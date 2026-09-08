@@ -1,0 +1,10 @@
+tunnel: my-apis
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+ingress:
+  - hostname: mmaudio.example.com
+    service: http://mmaudio-api:8000
+  - hostname: hyvf.example.com
+    service: http://hunyuanvideo-foley-api:8001
+  - hostname: sounds.example.com
+    service: http://sound-search-api:8002
+  - service: http_status:404

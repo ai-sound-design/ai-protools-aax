@@ -1,0 +1,19 @@
+{
+  "use_cloudflared": false,
+  "services": {
+    "mmaudio": {
+      "api_url_direct": "http://localhost:8000",
+      "api_url_cloudflared": "https://mmaudio.example.com"
+    },
+    "hunyuan": {
+      "api_url_direct": "http://localhost:8001",
+      "api_url_cloudflared": "https://hyvf.example.com"
+    },
+    "sound_search": {
+      "api_url_direct": "http://localhost:8002",
+      "api_url_cloudflared": "https://sounds.example.com"
+    }
+  },
+  "cf_access_client_id": "",
+  "cf_access_client_secret": ""
+}

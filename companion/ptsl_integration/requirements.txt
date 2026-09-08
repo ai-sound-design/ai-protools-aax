@@ -1,0 +1,17 @@
+# PTSL Integration Requirements (py-ptsl based)
+# Install with: pip install -r requirements.txt
+
+# Core dependencies for AAX Plugin
+grpcio==1.74.0  # py-ptsl requires exactly 1.74.0
+protobuf>=6.31.1,<6.32.0  # py-ptsl compatible range
+soundfile>=0.12.1
+requests>=2.31.0
+httpx>=0.27.0  # Used by some API clients
+imageio-ffmpeg>=0.4.9  # Cross-platform FFmpeg binaries via Python package
+numpy>=1.24.0  # Required by soundfile
+
+# py-ptsl will be installed separately in editable mode from ../external/py-ptsl
+# pip install -e ../external/py-ptsl
+
+# Development only (not needed in plugin):
+# poetry>=1.8.1
