@@ -1,0 +1,6 @@
+[submodule "external/JUCE"]
+	path = external/JUCE
+	url = https://github.com/juce-framework/JUCE
+[submodule "external/py-ptsl"]
+	path = external/py-ptsl
+	url = https://github.com/iluvcapra/py-ptsl.git

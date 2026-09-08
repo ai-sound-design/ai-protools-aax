@@ -1,0 +1,150 @@
+# Full Production Stack
+# ============================================================
+# Services: MMAudio API + HunyuanVideo-Foley API +
+#           Sound Search API + PostgreSQL + Cloudflare Tunnel
+#
+# Prerequisites: run setup.sh --full first
+#
+# Configure: copy .env.example to .env and fill in your values
+#   cp .env.example .env
+#
+# Run:   docker compose -f docker-compose.full.yml up -d
+# Stop:  docker compose -f docker-compose.full.yml down
+# Logs:  docker compose -f docker-compose.full.yml logs -f
+# ============================================================
+
+services:
+
+  # ── Generation: MMAudio Video-to-Audio API ────────────────
+  # Port 8000 | Env: mmaudio conda
+  mmaudio-api:
+    build: .
+    image: generation-api:latest
+    container_name: gen-mmaudio-api
+    restart: unless-stopped
+    working_dir: /workspace/protools-aax/standalone-API
+    volumes:
+      - ../:/workspace:Z
+      - ../conda-envs:/opt/miniforge/envs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    ports:
+      - "8000:8000"
+    command: >
+      /bin/bash -c "
+        source /opt/miniforge/etc/profile.d/conda.sh &&
+        conda activate mmaudio &&
+        python -m uvicorn main:app --host 0.0.0.0 --port 8000
+      "
+
+  # ── Generation: HunyuanVideo-Foley API ───────────────────
+  # Port 8001 | Env: hyvf conda
+  hunyuanvideo-foley-api:
+    build: .
+    image: generation-api:latest
+    container_name: gen-hyvf-api
+    restart: unless-stopped
+    working_dir: /workspace/protools-aax/hunyuanvideo-foley-API
+    volumes:
+      - ../:/workspace:Z
+      - ../conda-envs:/opt/miniforge/envs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    ports:
+      - "8001:8001"
+    command: >
+      /bin/bash -c "
+        source /opt/miniforge/etc/profile.d/conda.sh &&
+        conda activate hyvf &&
+        python -m uvicorn main:app --host 0.0.0.0 --port 8001
+      "
+
+  # ── Retrieval: Sound Search API (X-CLIP + pgvector) ──────
+  # Port 8002 | Requires: postgres (healthy)
+  sound-search-api:
+    build:
+      context: ./sound-search-API
+      dockerfile: Dockerfile
+    image: sound-search-api:latest
+    container_name: gen-sound-search-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - DATABASE_URL=postgresql://bbc_user:change_me@postgres:5432/bbc_sounds
+      - BBC_SOUNDS_PATH=/sounds
+      - XCLIP_MODEL=microsoft/xclip-base-patch32-16-frames
+    volumes:
+      # BBC sound files — set BBC_SOUNDS_DIR in .env to override default path
+      - ${BBC_SOUNDS_DIR:-../BBCSoundDownloader/sounds}:/sounds:ro
+      - gen-huggingface-cache:/root/.cache/huggingface
+    ports:
+      - "8002:8002"
+
+  # ── Database: PostgreSQL + pgvector ─────────────────────
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: gen-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=bbc_user
+      - POSTGRES_PASSWORD=change_me
+      - POSTGRES_DB=bbc_sounds
+    volumes:
+      - gen-postgres-data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bbc_user -d bbc_sounds"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Tunnel: Cloudflare ───────────────────────────────────
+  # Exposes all three APIs via your Cloudflare domain.
+  #
+  # Requires: TUNNEL_TOKEN set in .env
+  #   Get it: Cloudflare Zero Trust → Networks → Tunnels
+  #           → your tunnel → Configure → Token (single line, starts with eyJ)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: gen-cloudflared
+    restart: unless-stopped
+    depends_on:
+      - mmaudio-api
+      - hunyuanvideo-foley-api
+      - sound-search-api
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    # Pass token directly as cloudflared args (image ENTRYPOINT is 'cloudflared')
+    # --protocol http2: force TCP/HTTP2 instead of QUIC/UDP to avoid
+    # Docker container UDP buffer size limitations (QUIC needs 7 MB, containers get ~400 KB)
+    command: tunnel --no-autoupdate run --protocol http2 --token ${TUNNEL_TOKEN}
+
+volumes:
+  gen-postgres-data:
+  gen-huggingface-cache:

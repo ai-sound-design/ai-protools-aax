@@ -1,0 +1,176 @@
+# Build directories
+build/
+builds/
+Builds/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# Visual Studio files
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+*.VC.db
+*.VC.VC.opendb
+
+# JUCE generated files
+JuceLibraryCode/
+pt_v2a_artefacts/
+juce_build/
+
+# Embedded Python (too large for Git, set up locally)
+aax-plugin/Resources/python
+aax-plugin/Resources/python/
+aax-plugin/Resources/python-windows/
+aax-plugin/Resources/python-macos/
+aax-plugin/Resources/python-macintel/
+aax-plugin/python-macos/
+aax-plugin/python-macintel/
+
+# Embedded FFmpeg (too large for Git, download separately)
+aax-plugin/Resources/ffmpeg/ffmpeg.exe
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.app
+*.aax
+*.vst3
+
+# Object files
+*.obj
+*.o
+*.a
+*.lib
+
+# Debug files
+*.pdb
+*.ilk
+*.idb
+
+# Temporary files
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+
+# IDE files
+.vscode/
+*.code-workspace
+.idea/
+*.sublime-*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# Logs
+*.log
+log/
+logs/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Python (if any scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+
+# Node.js (if any web components)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# AAX specific
+*.aaxplugin/
+
+# Audio files (unless specifically needed)
+*.wav
+*.mp3
+*.flac
+*.aif
+*.aiff
+
+# Video files (unless specifically needed)
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Log files
+*_log.txt
+
+# Large model files
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.bin
+models/
+checkpoints/
+
+# Test outputs
+test-outputs/
+output/
+cache/
+/companion/test_results
+
+# PTSL venv
+venv_ptsl*/
+# Companion API config (local secrets)
+companion/api/config.json
+
+# cloudflared secret files
+cloudflared/cert.pem
+cloudflared/*.json
+
+# Database dumps (too large for git — see db-dump/README.md)
+db-dump/*.dump
+db-dump/*.sql
+
+# Local environment configuration (contains secrets)
+.env
+
+# BBC metadata database backups (not part of the anonymized repository)
+companion/database/*.sql

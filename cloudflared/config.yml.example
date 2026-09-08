@@ -1,0 +1,28 @@
+# Cloudflare Tunnel Configuration — EXAMPLE
+# ============================================================
+# Copy this file to config.yml and fill in your own values.
+#
+# How to get these values:
+#   1. Go to Cloudflare Zero Trust dashboard → Access → Tunnels
+#   2. Create a new tunnel (or use an existing one)
+#   3. Copy the tunnel name and UUID from the tunnel details
+#   4. Download the credentials JSON to cloudflared/<uuid>.json
+#   5. curl cloudflare's ca cert:
+#      cloudflared tunnel login  (saves cert.pem)
+#
+# Alternatively: use TUNNEL_TOKEN in .env instead of this file.
+#   → See SETUP.md section "Cloudflared" for the token-based approach.
+# ============================================================
+
+tunnel: <your-tunnel-name>
+credentials-file: /etc/cloudflared/<your-tunnel-uuid>.json
+
+ingress:
+  - hostname: mmaudio.yourdomain.com
+    service: http://mmaudio-api:8000
+  - hostname: hyvf.yourdomain.com
+    service: http://hunyuanvideo-foley-api:8001
+  - hostname: sounds.yourdomain.com
+    service: http://sound-search-api:8002
+  # Catch-all rule (required)
+  - service: http_status:404

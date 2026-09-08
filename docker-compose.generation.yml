@@ -1,0 +1,78 @@
+# Generation Services — MMAudio + HunyuanVideo-Foley APIs
+#
+# Run from inside protools-aax/ directory:
+#   docker compose -f docker-compose.generation.yml up -d
+#
+# Stop:
+#   docker compose -f docker-compose.generation.yml down
+#
+# View logs:
+#   docker compose -f docker-compose.generation.yml logs -f
+#
+# Requirements: run setup.sh first to create conda environments and download weights.
+
+services:
+
+  # MMAudio Video-to-Audio API — Port 8000
+  mmaudio-api:
+    build: .
+    image: generation-api:latest
+    container_name: gen-mmaudio-api
+    restart: unless-stopped
+    working_dir: /workspace/protools-aax/standalone-API
+    volumes:
+      - ../:/workspace:Z            # Project root mounted as /workspace
+      - ../conda-envs:/opt/miniforge/envs  # Conda environments (persist across rebuilds)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Model paths (defaults in shared/config.py — override here if needed)
+      # - MMAUDIO_PATH=/workspace/model-tests/repos/MMAudio
+      # - FORCE_DEVICE=cuda
+      # - VIDEO_CACHE_MAX_GB=32
+    ports:
+      - "8000:8000"
+    command: >
+      /bin/bash -c "
+        source /opt/miniforge/etc/profile.d/conda.sh &&
+        conda activate mmaudio &&
+        python -m uvicorn main:app --host 0.0.0.0 --port 8000
+      "
+
+  # HunyuanVideo-Foley Video-to-Audio API — Port 8001
+  hunyuanvideo-foley-api:
+    build: .
+    image: generation-api:latest
+    container_name: gen-hyvf-api
+    restart: unless-stopped
+    working_dir: /workspace/protools-aax/hunyuanvideo-foley-API
+    volumes:
+      - ../:/workspace:Z
+      - ../conda-envs:/opt/miniforge/envs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Model paths (defaults in shared/config.py — override here if needed)
+      # - HYVF_PATH=/workspace/model-tests/repos/HunyuanVideo-Foley
+      # - HYVF_WEIGHTS_PATH=/workspace/model-tests/models/HunyuanVideo-Foley
+      # - FORCE_DEVICE=cuda
+    ports:
+      - "8001:8001"
+    command: >
+      /bin/bash -c "
+        source /opt/miniforge/etc/profile.d/conda.sh &&
+        conda activate hyvf &&
+        python -m uvicorn main:app --host 0.0.0.0 --port 8001
+      "

@@ -1,0 +1,36 @@
+# PTSL Integration Setup Script
+# Run this to set up the Python environment for PTSL integration
+
+# 1. Create virtual environment
+python -m venv venv_ptsl
+
+# 2. Activate virtual environment
+# Windows PowerShell:
+# .\venv_ptsl\Scripts\Activate.ps1
+
+# Windows CMD:
+ .\venv_ptsl\Scripts\activate.bat
+
+# Upgrade pip
+python -m pip install --upgrade pip
+
+# Install base requirements
+pip install -r requirements.txt
+
+# Install py-ptsl from local repository (editable mode)
+"cd ..\external\py-ptsl"
+pip install -e $pyptstl_path
+
+
+
+
+# Test import
+python -c "import ptsl; print('✓ py-ptsl import successful'); print(f'  Version: {ptsl.__version__}')"
+python -c "import soundfile; print('✓ soundfile import successful')"
+python -c "import grpc; print('✓ grpcio import successful')"
+
+Write-Host "`n✅ Setup complete!" -ForegroundColor Green
+Write-Host "`nTo use this environment:" -ForegroundColor Cyan
+Write-Host "  1. Activate: .\venv_ptsl\Scripts\Activate.ps1" -ForegroundColor Gray
+Write-Host "  2. Test: python ptsl_integration\ptsl_client_v2.py --audio <file.wav>" -ForegroundColor Gray
+Write-Host "  3. In plugin: Use venv_ptsl\Scripts\python.exe" -ForegroundColor Gray
