@@ -1,4 +1,4 @@
-# Python Setup for PTV2A Plugin
+# Python Setup for AI Sound Design plugin
 
 This directory contains Python runtime setup for the AAX plugin.
 

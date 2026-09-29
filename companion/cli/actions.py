@@ -134,7 +134,10 @@ def action_get_duration(video_path: str, log_debug_func: Optional[Callable[[str]
 def action_import_audio(
     audio_path: str,
     timecode: Optional[str] = None,
-    log_debug_func: Optional[Callable[[str], None]] = None
+    log_debug_func: Optional[Callable[[str], None]] = None,
+    track_name: Optional[str] = None,
+    clip_name: Optional[str] = None,
+    timecode_out: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Import audio file to Pro Tools timeline.
@@ -170,12 +173,16 @@ def action_import_audio(
     try:
         success = import_audio_to_pro_tools(
             audio_path=audio_path,
-            timecode=timecode
+            timecode=timecode,
+            track_name=track_name,
+            clip_name=clip_name,
+            timecode_out=timecode_out,
         )
-        
+
         result = {
             'success': success,
-            'audio_path': audio_path
+            'audio_path': audio_path,
+            'track_name': track_name,
         }
         
         if not success:

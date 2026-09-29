@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build PTV2A AAX Plugin for macOS Intel (x86_64)
+# Build AI Sound Design AAX plugin for macOS Intel (x86_64)
 
 set -e  # Exit on error
 
@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "=================================================="
-echo "Building PTV2A for macOS Intel (x86_64)"
+echo "Building AI Sound Design for macOS Intel (x86_64)"
 echo "=================================================="
 
 # 1. Set symlink to Intel Python
@@ -30,10 +30,10 @@ echo "✓ Verified: Python is x86_64"
 # 2. Clean previous builds
 echo ""
 echo "Step 2/5: Cleaning previous builds..."
-sudo rm -rf "/Library/Application Support/Avid/Audio/Plug-Ins/PTV2A.aaxplugin"
-rm -rf ~/Library/Application\ Support/Avid/Audio/Plug-Ins/PTV2A.aaxplugin
+sudo rm -rf "/Library/Application Support/Avid/Audio/Plug-Ins/AI Sound Design.aaxplugin"
+rm -rf "$HOME/Library/Application Support/Avid/Audio/Plug-Ins/AI Sound Design.aaxplugin"
 # Also remove old signed plugin (wraptool can't delete root-owned files)
-sudo rm -rf build/pt_v2a_artefacts/Release/AAX/PTV2A.aaxplugin
+sudo rm -rf "build/pt_v2a_artefacts/Release/AAX/AI Sound Design.aaxplugin"
 echo "✓ Removed previous plugin installations"
 
 # 3. Build Release
@@ -57,5 +57,5 @@ echo "✓ Installer created"
 echo ""
 echo "=================================================="
 echo "✓ Intel build complete!"
-echo "Installer: installer_output/PTV2A-macOS-Intel-v0.1.0.pkg"
+echo "Installer: installer_output/AI-Sound-Design-macOS-Intel-v0.1.0.pkg"
 echo "=================================================="

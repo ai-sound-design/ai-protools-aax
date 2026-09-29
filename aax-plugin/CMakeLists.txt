@@ -57,14 +57,14 @@ juce_add_plugin(pt_v2a
     VERSION ${PROJECT_VERSION}
     
     # Plugin Identity (registered with Avid)
-    COMPANY_NAME "anonymous"
+    COMPANY_NAME "AI Sound Design"
     PLUGIN_MANUFACTURER_CODE LUDE     # 4-char manufacturer code (must be registered)
-    PLUGIN_CODE PTV2                  # 4-char plugin ID (unique identifier)
-    AAX_IDENTIFIER "com.anonymous.ptv2a"
-    
+    PLUGIN_CODE AISD                  # 4-char plugin ID (unique identifier)
+    AAX_IDENTIFIER "com.ai-sound-design.plugin"
+
     # Plugin Metadata
-    PRODUCT_NAME "PTV2A"              # Display name in Pro Tools
-    FORMATS AAX                       # AAX only (Pro Tools native format)
+    PRODUCT_NAME "AI Sound Design"    # Display name in Pro Tools and bundle name; PluginProcessor.h kPluginName must match
+FORMATS AAX                       # AAX only (Pro Tools native format)
     PLUGIN_AAX_CATEGORY "Utility"     # Shows in "Utility" menu in Pro Tools
     
     # Plugin Type Configuration
@@ -87,6 +87,7 @@ target_sources(pt_v2a PRIVATE         # only for this target
     Source/PluginProcessor.cpp        # Audio processing and business logic
     Source/PluginEditor.cpp           # GUI implementation
     Source/SoundRecommendationsComponent.cpp  # Sound library UI component (TASK 6)
+    Source/SettingsPanel.cpp          # Settings dialog: backend URLs, tunnel token
 )
 
 # ==============================================================================
@@ -115,18 +116,16 @@ add_custom_command(TARGET pt_v2a_AAX PRE_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${COMPANION_DIR}/standalone_api_client.py
         ${RESOURCES_PYTHON_SCRIPTS}/standalone_api_client.py
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${COMPANION_DIR}/hunyuanvideo_foley_api_client.py
-        ${RESOURCES_PYTHON_SCRIPTS}/hunyuanvideo_foley_api_client.py
+
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${COMPANION_DIR}/sound_search_api_client.py
         ${RESOURCES_PYTHON_SCRIPTS}/sound_search_api_client.py
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${COMPANION_DIR}/auto_spotting_wizard.py
-        ${RESOURCES_PYTHON_SCRIPTS}/auto_spotting_wizard.py
+        ${COMPANION_DIR}/spotting_client.py
+        ${RESOURCES_PYTHON_SCRIPTS}/spotting_client.py
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_SOURCE_DIR}/extract_memory_locations.py
-        ${RESOURCES_PYTHON_SCRIPTS}/extract_memory_locations.py
+        ${COMPANION_DIR}/hybrid_client.py
+        ${RESOURCES_PYTHON_SCRIPTS}/hybrid_client.py
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${COMPANION_DIR}/ptsl_integration
         ${RESOURCES_PYTHON_SITEPACKAGES}/ptsl_integration
@@ -175,6 +174,8 @@ add_custom_command(TARGET pt_v2a_AAX POST_BUILD
 target_compile_definitions(pt_v2a PRIVATE
     JUCE_WEB_BROWSER=0                # No web browser component (reduces binary size)
     JUCE_USE_CURL=1                   # Enable cURL for MMAudio API calls
+    JucePlugin_AAXDisableAudioSuite=1 # Insert-only: the plugin drives Pro Tools via PTSL, it is not an offline clip processor
+    JucePlugin_AAXDisableDynamicProcessing=1 # AAX_eProperty_Constraint_AlwaysProcess: the sound preview is mixed into processBlock() on a silent track, which Pro Tools' Dynamic Plug-In Processing would otherwise stop calling
 )
 
 # ==============================================================================

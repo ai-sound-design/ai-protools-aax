@@ -2,6 +2,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "SoundRecommendationsComponent.h"
+#include "AdapterProfile.h"
+#include <map>
 
 // Forward declaration to avoid circular include
 // (PluginProcessor.h already includes this file)
@@ -15,11 +17,11 @@ class PtV2AProcessor;
  * 
  * Current UI Elements (Phase 1 - Prototype):
  *   - Text input for audio generation prompt
- *   - "Render Audio" button to trigger generation
+ *   - "Generate Sound" button to trigger generation
  * 
  * Workflow:
  *   1. User enters text prompt (e.g., "thunder and rain")
- *   2. User clicks "Render Audio"
+ *   2. User clicks "Generate Sound"
  *   3. Editor validates API availability
  *   4. Editor reads timeline selection via PTSL (asynchronously!)
  *   5. Editor finds video file in Pro Tools session
@@ -101,25 +103,64 @@ private:
     
     /**
      * Mode selection radio buttons
-     * User chooses between Audio Generation (Generative AI), Sound Recommendation (Database), or Auto Spotting (Wizard of Oz)
+     * User chooses between Spotting (vision-language model), Sound Generation (generative AI),
+     * Sound Recommendation (database) and Hybrid (one generated sound per sound event)
      */
     juce::Label modeLabel { {}, "Mode:" };
-    juce::ToggleButton audioGenModeButton { "Audio Generation" };
-    juce::ToggleButton soundRecModeButton { "Sound Recommendation" };
-    juce::ToggleButton autoSpottingModeButton { "Spotting Memory Locations" };
+    juce::TextButton audioGenModeButton {"Sound Generation" };
+    juce::TextButton soundRecModeButton {"Sound Recommendation" };
+    juce::TextButton autoSpottingModeButton {"Spotting" };
+    juce::TextButton hybridModeButton { "Hybrid" };
+
+    /** Hybrid only: send the memory locations inside the selection to the backend as the sound events. */
+    juce::ToggleButton useMemoryLocationsToggle { "Use existing memory locations" };
+    /** Hybrid only: when a clip in the range has no memory locations, let the backend spot it (else skip it). */
+    juce::ToggleButton autoSpotToggle { "Spot the range automatically when it has none" };
+    /** Hybrid only: library recordings that sound like each generated sound, on a track underneath ... */
+    juce::ToggleButton useDatabaseSoundsToggle { "Use database sounds" };
+    /** ... or instead of the generated sound. */
+    juce::ToggleButton replaceGeneratedToggle { "Replace generated sounds" };
+    /** What the hybrid backend's health says about library matches (search service up, audio index present). */
+    bool hybridMatchAvailable = true;
+    juce::String hybridMatchReason;
+    int hybridHealthRequest = 0;
+    void refreshHybridBackendHealth();
+    void applyHybridMatchAvailability();
     
     /**
-     * Info label for Auto Spotting mode
-     * Displayed when Auto Spotting mode is active
+     * Small (i) next to the mode switch. Hovering shows what the current mode does;
+     * clicking shows the same text in a dialog. The mode buttons carry the same
+     * descriptions as tooltips.
      */
-    juce::Label autoSpottingInfoLabel { {}, "Automatically detects audio events in video and places markers at detected positions." };
+    juce::TextButton modeInfoButton { "i" };
+    void updateModeInfo();
+
+    /**
+     * Which backends are there: a mode whose kind has no adapter profile, or whose
+     * selected profile does not answer its health address, is greyed out with the
+     * reason in its tooltip. Probed in the background when the editor opens, after
+     * the settings were saved, and every 30 s after that.
+     */
+    struct BackendAvailability { bool available = true; juce::String reason; };
+    std::map<juce::String, BackendAvailability> backendAvailability;   // kind -> state
+    int availabilityRequest = 0;
+    void refreshBackendAvailability();
+    void applyBackendAvailability();
+
+    /** Spotting only: run over every clip of the video track instead of the selection. */
+    juce::TextButton spotWholeTrackButton { "Spot Entire Track..." };
+
+    /** Progress of a running multi-clip operation; hidden while idle. */
+    double progressValue = 0.0;                 // declared before progressBar, which binds to it
+    juce::ProgressBar progressBar { progressValue };
+    juce::Label progressLabel;
     
     /**
      * Unified action button - changes function based on selected mode
-     * Audio Generation mode: "Render Audio"
+     * Sound Generation mode: "Generate Sound"
      * Sound Recommendation mode: "Recommend Sounds"
      */
-    juce::TextButton actionButton { "Render Audio" };
+    juce::TextButton actionButton { "Generate Sound" };
     
     /**
      * Button to trigger audio generation with dummy video (for presentation)
@@ -137,19 +178,13 @@ private:
      */
     juce::TextButton openLogButton { "Open Log" };
 
-    /**
-     * Button to open Cloudflare Access settings dialog
-     * Allows user to enter CF Access credentials for secure API access
-     */
-    juce::TextButton settingsButton { "API Settings" };
+    /** Opens the settings dialog (backend URLs, optional tunnel token). */
+    juce::TextButton settingsButton { "Settings..." };
 
     
-    /**
-     * Warning label for invalid/missing API credentials
-     * Shows "⚠ API not connected" when credentials are not saved or invalid
-     */
+    /** Shown only when the tunnel is on but no token is saved. */
     juce::Label apiWarningLabel;
-    
+
     /**
      * Sound recommendations component for displaying BBC Sound Search results
      * Shows search results with navigation, preview, and import functionality
@@ -218,16 +253,16 @@ private:
      * Random seed input field
      * 
      * Controls randomness in audio generation. Same seed = reproducible results.
-     * 
-     * Default: 42
-     * Format: Integer (e.g., "42", "12345")
+     *
+     * Default: -1, a random seed per run; the seed used is logged and part of the file name.
+     * Format: Integer (e.g., "-1", "42", "12345")
      */
     juce::TextEditor seedInput;
     juce::Label seedLabel { {}, "Seed:" };
 
     // Choice between V2A and T2A generation modes:
-    juce::ToggleButton v2aModeButton { "V2A (from Video)" };
-    juce::ToggleButton t2aModeButton { "T2A (Text Only)" };
+    juce::TextButton v2aModeButton {"V2A (from Video)" };
+    juce::TextButton t2aModeButton {"T2A (Text Only)" };
     juce::Label durationLabel { {}, "Duration:" };
     juce::ComboBox durationComboBox;       
     /**
@@ -249,15 +284,23 @@ private:
     //==============================================================================
     
     /**
-     * Model provider selection dropdown
-     * Options: "MMAudio", "HunyuanVideo-Foley"
-     * 
-     * Determines which API to use:
-     *   - MMAudio: Port 8000, 16kHz/44.1kHz, general audio generation
-     *   - HunyuanVideo-Foley: Port 8001, 48kHz, professional Foley sounds
+     * Backend list: the adapter profiles of the current mode's kind
+     * (generation, search or spotting). The plugin knows no model; a profile
+     * describes where a backend runs and how it is spoken to.
      */
-    juce::Label modelLabel { {}, "Model:" };
-    juce::ComboBox modelProviderComboBox;
+    juce::Label modelLabel { {}, "Backend:" };
+    juce::ComboBox modelProviderComboBox;                          ///< adapter profiles of the current mode's kind
+    std::vector<AdapterProfile> adapterChoices;    ///< item id = index + 1
+
+    /** "generation", "search" or "spotting" for the current workflow mode. */
+    juce::String currentAdapterKind() const;
+    /** Fill the Backend list with the profiles of the current mode and select the saved one. */
+    void refreshAdapterCombo();
+    /** The profile currently shown in the Backend list (invalid if none). */
+    AdapterProfile currentAdapter() const;
+    void handleAdapterChanged();
+    /** Enable the parameter rows the selected generation adapter supports. */
+    void applyAdapterCapabilities();
     
     //==============================================================================
     // Event Handlers
@@ -306,30 +349,76 @@ private:
     void handleGenerationModeChange();
     
     /**
-     * Handle workflow mode change (Audio Generation <-> Sound Recommendation <-> Auto Spotting)
+     * Handle workflow mode change (Spotting, Sound Generation, Sound Recommendation, Hybrid)
      * Updates UI: enables/disables relevant fields, changes action button text
      */
     void handleWorkflowModeChange();
     
     /**
-     * Handle Auto Spotting button click - Wizard of Oz prototype
-     * Simulates automatic marker detection with fake progress and creates memory locations
-     * 
-     * Steps:
-     *   1. Start Python script for fake progress + memory location creation
-     *   2. Show progress feedback via timer (12-15s)
-     *   3. Display success message
-     * 
-     * @note For user study only - creates hardcoded memory locations
+     * Handle Spotting button click.
+     *
+     * Runs spotting_client.py --from-selection. The script resolves the video clips
+     * under the timeline selection (made on any track) through PTSL, cuts each clip
+     * range, sends it to the spotting backend and places one memory location per
+     * sound event. Progress is read from a small JSON file the script keeps updated.
      */
     void handleAutoSpottingButtonClicked();
+    void handleHybridButtonClicked();
+    /** Start hybrid_client.py over the selection: one generated sound per event, each on its own track. */
+    void startHybrid();
+
+    /** Start spotting_client.py over the selection or, with wholeTrack, over the whole video track. */
+    void startSpotting (bool wholeTrack);
+
+    /** Read the script's progress file into the progress bar and label. */
+    void updateSpottingProgress();
+
+    /** Re-enable the buttons and hide the progress widgets after a spotting run. */
+    void resetSpottingUi();
+    juce::String idleActionButtonText() const;
+    juce::String modeInfoTitle() const;
+
+    //==============================================================================
+    // Video segments: the selection (made on any track) mapped onto the video track
+    //==============================================================================
+
+    /** Which workflow asked for the segments. */
+    enum class ResolveTarget { Generation, SoundSearch };
+    ResolveTarget resolveTarget = ResolveTarget::Generation;
+
+    /** Run standalone_api_client.py --action resolve_video_segments (async, timer-polled). */
+    void startVideoSegmentResolve (ResolveTarget target);
+
+    /** Parse the resolver's JSON; start the per-clip generation queue or the sound search. */
+    void handleVideoSegmentsResult (const juce::String& output);
+
+    /** Generation queue: take the next usable segment, or finish the run. */
+    void startNextSegmentGeneration();
+
+    /** Record the current segment as failed and continue with the next one. */
+    void segmentFailed (const juce::String& reason);
+
+    /** Progress bar and label for the current segment. */
+    void updateSegmentProgress (const juce::String& stage);
+
+    /** End of a generation run: summary (if report), queue cleared, buttons restored. */
+    void finishSegmentGeneration (bool report);
+
+    /** Restore the action button for the current workflow mode, hide progress, state Idle. */
+    void resetActionUi();
+
+    /** Segments of the current run (JSON objects from the resolver) and the queue position. */
+    juce::Array<juce::var> pendingSegments;
+    int currentSegmentIndex = -1;
+    int segmentsGenerated = 0;
+    juce::StringArray skippedSegments;
     
-    /**
-     * Update API credential status warning
-     * Shows/hides warning label based on credential validity
-     */
-    void updateAPICredentialStatus();
-    
+    /** Show the tunnel-token warning when the tunnel is on and no token is saved. */
+    void updateBackendStatus();
+
+    /** True unless the tunnel is on without a token; then explains and returns false. */
+    bool tunnelTokenPresent (const juce::String& action);
+
     /**
      * Handle T2A render button click - text-to-audio workflow without video
      * 
@@ -359,12 +448,8 @@ private:
     void handleSoundImport (const SoundResult& sound);
     void startSoundImportProcess (const SoundResult& sound, const juce::String& timecode);
     
-    /**
-     * Show Cloudflare Access credential dialog
-     * Allows user to enter Client ID and Client Secret for secure API access
-     * Saves credentials to config.json file in plugin bundle
-     */
-    void showCredentialDialog();
+    /** Open the settings dialog. */
+    void showSettings();
 
 
     //==============================================================================
@@ -383,12 +468,6 @@ private:
      *   - Timeout: Kill process, show error
      */
     void timerCallback() override;
-    
-    /**
-     * Start async timeline selection read (V2A workflow - includes video clip check)
-     * Launches PTSL process with get_video_info and starts timer for polling
-     */
-    void startTimelineSelectionRead();
     
     /**
      * Start async timeline selection read (T2A workflow - timeline only, no video)
@@ -435,32 +514,6 @@ private:
      * @param output Raw output from PTSL import process
      */
     void handleAudioImportResult (const juce::String& output);
-    
-    /**
-     * Start async clip bounds reading via PTSL (Phase 1 of auto-trim workflow).
-     * Launches Python script with --action get_clip_bounds to read clip boundaries.
-     * Returns quickly - actual result handling happens in handleClipBoundsResult().
-     * 
-     * @param videoPath Path to source video file (stored for later generation)
-     */
-    void startClipBoundsRead (const juce::String& videoPath);
-    
-    /**
-     * Handle clip bounds result (called from timer callback).
-     * Parses JSON output with clip boundaries and stores in member variables.
-     * Then proceeds to Phase 2: background audio generation with clip bounds.
-     * 
-     * @param output Raw JSON output from Python get_clip_bounds action
-     */
-    void handleClipBoundsResult (const juce::String& output);
-    
-    /**
-     * Handle clip bounds result for Sound Search workflow.
-     * Parses JSON output with clip boundaries and triggers sound search.
-     * 
-     * @param output Raw JSON output from Python get_clip_bounds action
-     */
-    void handleClipBoundsForSoundSearchResult (const juce::String& output);
     
     /**
      * Get source video file duration via FFprobe
@@ -526,18 +579,17 @@ private:
     enum class AsyncState
     {
         Idle,                              // No operation in progress
-        ReadingTimeline,                   // Reading timeline selection via PTSL (for audio generation)
-        ReadingTimelineForSoundSearch,     // Reading timeline selection via PTSL (for sound search)
+        ReadingTimeline,                   // Reading timeline selection via PTSL (T2A: import position only)
         ReadingTimelineForSoundImport,     // Reading timeline selection via PTSL (before sound import)
-        ReadingClipBounds,                 // Reading clip boundaries via PTSL (for audio generation)
-        ReadingClipBoundsForSoundSearch,   // Reading clip boundaries via PTSL (for sound search)
+        ResolvingVideoSegments,            // resolve_video_segments: selection (any track) -> video clips beneath
         GeneratingAudio,                   // Python generating audio (polling for output file)
         SearchingSounds,                   // Python searching sounds (polling for JSON output)
         DownloadingSingleSound,            // Python downloading single sound (polling for JSON output)
         ImportingAudio,                    // Importing generated audio to Pro Tools via PTSL
         ImportingSoundFX,                  // Importing sound library audio to Pro Tools via PTSL
-        AutoSpottingAnalysis               // Auto Spotting wizard: fake progress + memory location creation
-    };
+        SpottingAnalysis,                  // spotting_client.py: selection -> clips -> backend -> markers
+        HybridGeneration                   // hybrid_client.py: selection -> clips -> backend -> one track per sound
+};
     
     AsyncState currentAsyncState = AsyncState::Idle;
     
@@ -546,13 +598,19 @@ private:
     {
         AudioGeneration,
         SoundRecommendation,
-        AutoSpotting
+        AutoSpotting,
+        Hybrid                 ///< one generated sound per sound event, each on its own track
     };
     
     WorkflowMode currentWorkflowMode = WorkflowMode::AudioGeneration;
+    juce::String modeDescription (WorkflowMode mode) const;   // what a mode does, for tooltips and the (i)
     
     /** PTSL process handle (for async timeline selection and import) */
     std::unique_ptr<juce::ChildProcess> ptslProcess;
+
+    /** Progress document written by spotting_client.py while it runs. */
+    juce::File spottingProgressFile;
+    juce::Time spottingProgressMtime;
     
     /** Sound search process handle (kept alive during search, no stdout reading) */
     std::unique_ptr<juce::ChildProcess> soundSearchProcess;
@@ -566,8 +624,10 @@ private:
     /** Time when sound search started (for timeout and polling) */
     juce::Time soundSearchStartTime;
     
-    /** Time when current async operation started (for timeout detection) */
+    /** Time when current async operation started (the "(40s)" on the button) */
     juce::Time asyncOperationStartTime;
+    /** Last sign of life from a multi-clip script (progress file changed); the timeout counts from here */
+    juce::Time lastProgressTime;
     
     /** Expected output file path (for audio generation polling) */
     juce::String expectedAudioOutputPath;
@@ -580,6 +640,12 @@ private:
     
     /** Current sound being downloaded (stored for download process) */
     SoundResult currentDownloadingSound;
+
+    /** Import button pressed on a sound that is not downloaded yet: import it once it is. */
+    int autoImportSoundId = -1;
+
+    /** Play a result: from its downloaded file, from the preview cache, or fetched from the backend. */
+    void startSoundPreview (const SoundResult& sound);
     
     /** Video path and prompt (stored for generation process) */
     juce::String currentVideoPath;
@@ -587,9 +653,11 @@ private:
     
     /** Timeline selection timecode (stored for audio import positioning) */
     juce::String timelineInTime;  // e.g., "00:00:07:00"
-    
+    float timelineFps = 30.0f;    // timecode rate of the session, from get_video_info
+
     /** Pending sound import (stored while reading timeline position) */
     SoundResult pendingSoundImport;
+    juce::String currentTimecodeOut;   ///< end of the selection read for the sound import
     
     /** Timeline selection in seconds (for video trimming calculations) */
     float timelineInSeconds = 0.0f;
@@ -609,13 +677,26 @@ private:
     float t2aDuration = 8.0f;
     
     /** Timeout for PTSL calls (milliseconds) */
-    static constexpr int PTSL_TIMEOUT_MS = 10000;  // 10 seconds
+    static constexpr int PTSL_TIMEOUT_MS = 10000;  // 10 seconds: quick PTSL reads
+    static constexpr int IMPORT_TIMEOUT_MS = 120000;  // 2 minutes: Pro Tools converts and copies the file on import
     
     /** Timeout for audio generation (milliseconds) */
-    static constexpr int GENERATION_TIMEOUT_MS = 120000;  // 2 minutes
+    /** Outcome of the last action, shown in the line under the buttons instead of a dialog.
+        Pro Tools' own operations (render, import) finish without modal confirmation; the
+        result on the timeline is the confirmation. Dialogs are kept for failures only. */
+    void showStatus (const juce::String& text, bool warning = false);
+
+    /** --track-name / --clip-name for the import_audio action (own track, readable clip name). */
+    void addImportTargetArgs (juce::StringArray& commandArray, const juce::String& clipLabel);
+    juce::String currentImportClipLabel() const;
+
+    static constexpr int GENERATION_TIMEOUT_MS = 300000;// 5 minutes: a cold backend loads its model first
     
     /** Timer polling interval (milliseconds) */
     static constexpr int TIMER_INTERVAL_MS = 100;  // Check every 100ms
+
+    /** Shows the tooltips of this editor's components; parented so it stays inside the plugin window. */
+    juce::TooltipWindow tooltipWindow { this, 400 };
 
     //==============================================================================
     // JUCE Leak Detector (Debug builds only)

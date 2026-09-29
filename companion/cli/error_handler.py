@@ -2,9 +2,9 @@
 Centralized error handling for all API client scripts
 
 Ensures consistent JSON error responses across:
-- standalone_api_client.py (MMAudio)
-- hunyuanvideo_foley_api_client.py (HunyuanVideo-Foley)
-- sound_search_api_client.py (Sound Search)
+- standalone_api_client.py (generation and Pro Tools actions)
+- sound_search_api_client.py (sound search)
+- spotting_client.py (spotting)
 """
 
 import json

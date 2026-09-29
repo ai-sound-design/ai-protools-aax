@@ -1,6 +1,6 @@
-# Mac Build Guide for PTV2A AAX Plugin
+# Mac Build Guide for AI Sound Design AAX plugin
 
-This guide explains how to build the PTV2A plugin for macOS, including setting up embedded Python and creating a Universal Binary that works on both Apple Silicon (M1/M2/M3) and Intel Macs.
+This guide explains how to build the AI Sound Design plugin for macOS, including setting up embedded Python and creating a Universal Binary that works on both Apple Silicon (M1/M2/M3) and Intel Macs.
 
 ## Prerequisites
 
@@ -140,15 +140,15 @@ cmake .. \
 # Build AAX target
 cmake --build . --config Release --target pt_v2a_AAX -j8
 
-# Output location: build/pt_v2a_artefacts/AAX/PTV2A.aaxplugin
+# Output location: build/pt_v2a_artefacts/AAX/AI Sound Design.aaxplugin
 ```
 
 ### Verify Universal Binary
 ```bash
-cd build/pt_v2a_artefacts/AAX/PTV2A.aaxplugin/Contents/MacOS
+cd build/pt_v2a_artefacts/AAX/AI Sound Design.aaxplugin/Contents/MacOS
 
 # Check plugin binary
-file PTV2A
+file "AI Sound Design"
 # Should show: Mach-O universal binary with 2 architectures: [x86_64] [arm64e]
 
 # Check embedded Python
@@ -170,12 +170,12 @@ cd build/pt_v2a_artefacts/AAX
     --account YOUR_DEVELOPER_ACCOUNT \
     --password YOUR_PASSWORD \
     --wcguid YOUR_DEVELOPER_WCGUID \
-    --in PTV2A.aaxplugin \
-    --out PTV2A.aaxplugin
+    --in AI Sound Design.aaxplugin \
+    --out AI Sound Design.aaxplugin
 
 # Verify signature
 /Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool verify \
-    --in PTV2A.aaxplugin
+    --in AI Sound Design.aaxplugin
 ```
 
 ### Automated Signing (Optional)
@@ -206,11 +206,11 @@ endif()
 ### Manual Installation
 ```bash
 # Copy to Pro Tools AAX folder
-sudo cp -R build/pt_v2a_artefacts/AAX/PTV2A.aaxplugin \
+sudo cp -R build/pt_v2a_artefacts/AAX/AI Sound Design.aaxplugin \
     "/Library/Application Support/Avid/Audio/Plug-Ins/"
 
 # Set correct permissions
-sudo chmod -R 755 "/Library/Application Support/Avid/Audio/Plug-Ins/PTV2A.aaxplugin"
+sudo chmod -R 755 "/Library/Application Support/Avid/Audio/Plug-Ins/AI Sound Design.aaxplugin"
 
 # Restart Pro Tools
 killall "Pro Tools" 2>/dev/null
@@ -222,7 +222,7 @@ Create `aax-plugin/install_mac.sh`:
 #!/bin/bash
 set -e
 
-PLUGIN_NAME="PTV2A.aaxplugin"
+PLUGIN_NAME="AI Sound Design.aaxplugin"
 BUILD_PATH="build/pt_v2a_artefacts/AAX/${PLUGIN_NAME}"
 INSTALL_PATH="/Library/Application Support/Avid/Audio/Plug-Ins"
 
@@ -254,15 +254,15 @@ Make executable: `chmod +x install_mac.sh`
 cd build/pt_v2a_artefacts/AAX
 
 # Create DMG
-hdiutil create -volname "PTV2A Plugin v0.1.0" \
-    -srcfolder PTV2A.aaxplugin \
+hdiutil create -volname "AI Sound Design plugin v0.1.0" \
+    -srcfolder AI Sound Design.aaxplugin \
     -ov -format UDZO \
-    PTV2A_v0.1.0_macOS.dmg
+    AI-Sound-Design_v0.1.0_macOS.dmg
 
-# Output: PTV2A_v0.1.0_macOS.dmg (ready for distribution)
+# Output: AI-Sound-Design_v0.1.0_macOS.dmg (ready for distribution)
 ```
 
-Users drag `PTV2A.aaxplugin` from DMG to `/Library/Application Support/Avid/Audio/Plug-Ins/`
+Users drag `AI Sound Design.aaxplugin` from DMG to `/Library/Application Support/Avid/Audio/Plug-Ins/`
 
 ---
 
@@ -273,7 +273,7 @@ Users drag `PTV2A.aaxplugin` from DMG to `/Library/Application Support/Avid/Audi
 **Check signatures:**
 ```bash
 /Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool verify \
-    --in "/Library/Application Support/Avid/Audio/Plug-Ins/PTV2A.aaxplugin"
+    --in "/Library/Application Support/Avid/Audio/Plug-Ins/AI Sound Design.aaxplugin"
 ```
 
 **Check console logs:**
@@ -292,7 +292,7 @@ log stream --predicate 'process == "Pro Tools"' --level debug
 
 **Check embedded Python structure:**
 ```bash
-cd "/Library/Application Support/Avid/Audio/Plug-Ins/PTV2A.aaxplugin/Contents/Resources"
+cd "/Library/Application Support/Avid/Audio/Plug-Ins/AI Sound Design.aaxplugin/Contents/Resources"
 ls -la python/bin/python3
 ```
 
@@ -315,11 +315,11 @@ Should output Universal Binary FFmpeg path.
 ## Directory Structure (Final)
 
 ```
-PTV2A.aaxplugin/
+AI Sound Design.aaxplugin/
 ├── Contents/
 │   ├── Info.plist
 │   ├── MacOS/
-│   │   └── PTV2A              # Universal Binary (arm64 + x86_64)
+│   │   └── AI Sound Design    # Universal Binary (arm64 + x86_64)
 │   └── Resources/
 │       └── python/
 │           ├── bin/

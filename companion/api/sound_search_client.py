@@ -41,14 +41,12 @@ DEFAULT_NUM_FRAMES = 16
 
 
 def get_sound_search_url() -> str:
-    """Get the appropriate Sound Search API URL based on config."""
-    cfg = get_config()
-    services = cfg.get("services", {})
-    sound_search = services.get("sound_search", {})
-    
-    if use_cloudflared():
-        return sound_search.get("api_url_cloudflared", "https://sounds.example.com")
-    return sound_search.get("api_url_direct", "http://localhost:8002")
+    """Base URL of the selected search adapter profile (falls back to the legacy services table)."""
+    try:
+        from .config import get_api_url
+    except ImportError:
+        from config import get_api_url  # type: ignore
+    return get_api_url("sound_search") or "http://localhost:8002"
 
 
 def check_api_health(quiet: bool = False) -> bool:
@@ -150,7 +148,13 @@ def search_sounds(
             'text_weight': text_weight,
             'num_frames': num_frames
         }
-        
+        # The selected search profile may pin fields, e.g. which library to search.
+        try:
+            from .adapters import search_request_fields
+            data.update(search_request_fields())
+        except Exception:
+            pass
+
         if text_query:
             data['text'] = text_query
         
@@ -189,8 +193,9 @@ def search_sounds(
             print(f"[ERROR] Search request timed out after 60s: {e}")
         # Log to temp file for debugging
         import tempfile
+        from .config import logs_enabled
         debug_log = Path(tempfile.gettempdir()) / "sound_search_client_error.log"
-        with open(debug_log, 'a') as f:
+        with open(debug_log if logs_enabled() else os.devnull, 'a') as f:
             import datetime
             f.write(f"[{datetime.datetime.now()}] Timeout: {e}\n")
         return None
@@ -199,8 +204,9 @@ def search_sounds(
             print(f"[ERROR] Connection failed - is the API server running on {get_sound_search_url()}?: {e}")
         # Log to temp file for debugging
         import tempfile
+        from .config import logs_enabled
         debug_log = Path(tempfile.gettempdir()) / "sound_search_client_error.log"
-        with open(debug_log, 'a') as f:
+        with open(debug_log if logs_enabled() else os.devnull, 'a') as f:
             import datetime
             f.write(f"[{datetime.datetime.now()}] ConnectionError: {e}\n")
         return None
@@ -209,8 +215,9 @@ def search_sounds(
             print(f"[ERROR] Search failed: {e}")
         # Log to temp file for debugging
         import tempfile
+        from .config import logs_enabled
         debug_log = Path(tempfile.gettempdir()) / "sound_search_client_error.log"
-        with open(debug_log, 'a') as f:
+        with open(debug_log if logs_enabled() else os.devnull, 'a') as f:
             import datetime
             import traceback
             f.write(f"[{datetime.datetime.now()}] RequestException: {e}\n")
@@ -289,11 +296,10 @@ def download_sound(
             filename = content_disp.split('filename=')[-1].strip('"')
         else:
             # Fallback: get from sound info
-            info = get_sound_info(sound_id, quiet=True)
-            if info:
-                filename = os.path.basename(info['file_path'])
-            else:
-                filename = f"sound_{sound_id}.wav"
+            info = get_sound_info(sound_id, quiet=True) or {}
+            name = (info.get('file_path') or (info.get('extra') or {}).get('file_name')
+                    or info.get('external_id') or f"sound_{sound_id}.wav")
+            filename = os.path.basename(str(name))
         
         # Determine output path
         if output_path:

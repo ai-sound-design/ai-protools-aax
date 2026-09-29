@@ -8,15 +8,25 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-# Paths - use user config directory (matches C++ PluginProcessor path)
+# Paths - user config directory, shared with the plugin (PluginProcessor::getUserDataDir).
+# The folder name must match kUserDataDirName in PluginProcessor.h.
+_APP_DIR_NAME = 'AI Sound Design'
 if os.name == 'nt':  # Windows
-    _USER_CONFIG_DIR = Path(os.environ.get('APPDATA', '')) / 'PTV2A'
+    _APP_DATA_ROOT = Path(os.environ.get('APPDATA', ''))
 else:  # macOS
-    # macOS: JUCE's userApplicationDataDirectory returns ~/Library/ (not ~/Library/Application Support/)
-    _USER_CONFIG_DIR = Path.home() / 'Library' / 'PTV2A'
+    # JUCE's userApplicationDataDirectory returns ~/Library/ (not ~/Library/Application Support/)
+    _APP_DATA_ROOT = Path.home() / 'Library'
 
-_USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+_USER_CONFIG_DIR = _APP_DATA_ROOT / _APP_DIR_NAME
 _CONFIG_PATH = _USER_CONFIG_DIR / "config.json"
+
+if not _USER_CONFIG_DIR.exists():
+    _USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # First run after the rename from PTV2A: carry the old settings over.
+    _legacy = _APP_DATA_ROOT / 'PTV2A' / 'config.json'
+    if _legacy.exists() and not _CONFIG_PATH.exists():
+        import shutil
+        shutil.copyfile(_legacy, _CONFIG_PATH)
 
 # =============================================================================
 # Shared Settings (Both MMAudio and HunyuanVideo-Foley)
@@ -27,18 +37,24 @@ DEFAULT_API_URL = "http://localhost:8000"
 # Config defaults (overridden by config.json in the user config directory, see _CONFIG_PATH)
 CONFIG_DEFAULTS: Dict[str, Any] = {
     "use_cloudflared": False,
+    "save_logs": True,
+    "search_results": 10,
     "services": {
         "mmaudio": {
             "api_url_direct": "http://localhost:8000",
-            "api_url_cloudflared": "https://mmaudio.example.com",
+            "api_url_cloudflared": "",
         },
         "hunyuan": {
             "api_url_direct": "http://localhost:8001",
-            "api_url_cloudflared": "https://hyvf.example.com",
+            "api_url_cloudflared": "",
         },
         "sound_search": {
             "api_url_direct": "http://localhost:8002",
-            "api_url_cloudflared": "https://sounds.example.com",
+            "api_url_cloudflared": "",
+        },
+        "spotting": {
+            "api_url_direct": "http://localhost:8003",
+            "api_url_cloudflared": "",
         },
     },
     "cf_access_client_id": "",
@@ -69,7 +85,7 @@ def _load_config() -> Dict[str, Any]:
             if isinstance(data, dict):
                 # Merge shallow keys, but keep nested dicts intact
                 cfg.update(data)
-                for service in ("mmaudio", "hunyuan", "sound_search"):
+                for service in CONFIG_DEFAULTS["services"]:
                     svc_defaults = CONFIG_DEFAULTS["services"][service]
                     cfg["services"].setdefault(service, svc_defaults.copy())
                     cfg["services"][service] = {
@@ -92,6 +108,11 @@ def get_config() -> Dict[str, Any]:
     return _load_config().copy()
 
 
+def logs_enabled() -> bool:
+    """Whether the companion scripts may write debug log files (plugin setting "Save a log file")."""
+    return bool(_load_config().get("save_logs", True))
+
+
 def use_cloudflared() -> bool:
     cfg = _load_config()
     return bool(cfg.get("use_cloudflared"))
@@ -104,6 +125,14 @@ def get_service_urls(service: str) -> Dict[str, str]:
 
 
 def get_api_url(service: str) -> str:
+    """URL of a service: the selected adapter profile's address, else the legacy services table."""
+    try:
+        from .adapters import service_url
+    except ImportError:  # companion run as loose modules
+        from adapters import service_url  # type: ignore
+    from_profile = service_url(service)
+    if from_profile:
+        return from_profile
     service_cfg = get_service_urls(service)
     if use_cloudflared():
         return service_cfg.get("api_url_cloudflared") or service_cfg.get("api_url_direct") or ""
@@ -155,7 +184,7 @@ SUPPORTED_VIDEO_FORMATS = {
 
 # Common generation parameters
 DEFAULT_NEGATIVE_PROMPT = "voices, music, melody, singing, speech,interference"
-DEFAULT_SEED = 42
+DEFAULT_SEED = -1   # -1: a random seed per run (the seed used is logged and part of the file name)
 
 # Output configuration
 DEFAULT_OUTPUT_FORMAT = "wav"  # "wav" or "flac"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Create macOS PKG installer for PTV2A AAX Plugin
+# Create macOS PKG installer for AI Sound Design AAX plugin
 # Usage: ./create_installer_mac.sh [intel|arm]
 
 set -e  # Exit on error
@@ -15,14 +15,14 @@ cd "$SCRIPT_DIR"
 
 VERSION="0.1.0"
 if [ "$ARCH" == "intel" ]; then
-    INSTALLER_NAME="PTV2A-macOS-Intel-v${VERSION}"
+    INSTALLER_NAME="AI-Sound-Design-macOS-Intel-v${VERSION}"
     ARCH_DISPLAY="Intel (x86_64)"
 else
-    INSTALLER_NAME="PTV2A-macOS-AppleSilicon-v${VERSION}"
+    INSTALLER_NAME="AI-Sound-Design-macOS-AppleSilicon-v${VERSION}"
     ARCH_DISPLAY="Apple Silicon (arm64)"
 fi
 
-PLUGIN_PATH="$HOME/Library/Application Support/Avid/Audio/Plug-Ins/PTV2A.aaxplugin"
+PLUGIN_PATH="$HOME/Library/Application Support/Avid/Audio/Plug-Ins/AI Sound Design.aaxplugin"
 STAGING_DIR="installer_staging_mac"
 OUTPUT_DIR="installer_output"
 COMPONENT_PKG="$STAGING_DIR/${INSTALLER_NAME}-component.pkg"
@@ -40,7 +40,7 @@ echo "Copying signed plugin..."
 cp -R "$PLUGIN_PATH" "$STAGING_DIR/"
 
 # Verify plugin architecture matches
-PLUGIN_PYTHON_ARCH=$(file "$STAGING_DIR/PTV2A.aaxplugin/Contents/Resources/python/bin/python3.12" | grep -o "x86_64\|arm64")
+PLUGIN_PYTHON_ARCH=$(file "$STAGING_DIR/AI Sound Design.aaxplugin/Contents/Resources/python/bin/python3.12" | grep -o "x86_64\|arm64")
 if [ "$ARCH" == "intel" ] && [ "$PLUGIN_PYTHON_ARCH" != "x86_64" ]; then
     echo "ERROR: Plugin contains wrong architecture (expected x86_64, got $PLUGIN_PYTHON_ARCH)"
     exit 1
@@ -54,13 +54,13 @@ echo "✓ Architecture verified: $PLUGIN_PYTHON_ARCH"
 echo "Preparing install structure..."
 INSTALL_ROOT="$STAGING_DIR/install_root"
 mkdir -p "$INSTALL_ROOT"
-mv "$STAGING_DIR/PTV2A.aaxplugin" "$INSTALL_ROOT/"
+mv "$STAGING_DIR/AI Sound Design.aaxplugin" "$INSTALL_ROOT/"
 
 # Create component package
 echo "Building component package..."
 pkgbuild \
     --root "$INSTALL_ROOT" \
-    --identifier "com.anonymous.ptv2a.plugin" \
+    --identifier "com.ai-sound-design.plugin.installer" \
     --version "$VERSION" \
     --install-location "/Library/Application Support/Avid/Audio/Plug-Ins" \
     "$COMPONENT_PKG"
@@ -69,21 +69,21 @@ pkgbuild \
 cat > "$STAGING_DIR/distribution.xml" << EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-    <title>PTV2A Audio Plugin ($ARCH_DISPLAY)</title>
+    <title>AI Sound Design ($ARCH_DISPLAY)</title>
     <welcome file="welcome.html"/>
     <conclusion file="conclusion.html"/>
     <domains enable_localSystem="true"/>
     <options customize="never" require-scripts="false" hostArchitectures="$PLUGIN_PYTHON_ARCH"/>
     <choices-outline>
         <line choice="default">
-            <line choice="com.anonymous.ptv2a.plugin"/>
+            <line choice="com.ai-sound-design.plugin.installer"/>
         </line>
     </choices-outline>
     <choice id="default"/>
-    <choice id="com.anonymous.ptv2a.plugin" visible="false">
-        <pkg-ref id="com.anonymous.ptv2a.plugin"/>
+    <choice id="com.ai-sound-design.plugin.installer" visible="false">
+        <pkg-ref id="com.ai-sound-design.plugin.installer"/>
     </choice>
-    <pkg-ref id="com.anonymous.ptv2a.plugin" version="$VERSION" onConclusion="none">
+    <pkg-ref id="com.ai-sound-design.plugin.installer" version="$VERSION" onConclusion="none">
         ${INSTALLER_NAME}-component.pkg
     </pkg-ref>
 </installer-gui-script>
@@ -101,7 +101,7 @@ cat > "$STAGING_DIR/welcome.html" << EOF
     </style>
 </head>
 <body>
-    <h1>Welcome to PTV2A Audio Plugin</h1>
+    <h1>Welcome to AI Sound Design</h1>
     <p>This installer will install the PTV2A AAX plugin for Pro Tools.</p>
     <p><strong>Architecture:</strong> $ARCH_DISPLAY</p>
     <p>The plugin uses AI to generate audio from video content and provides sound effect search capabilities.</p>
@@ -127,9 +127,9 @@ cat > "$STAGING_DIR/conclusion.html" << EOF
 </head>
 <body>
     <h1>Installation Complete</h1>
-    <p>PTV2A has been successfully installed.</p>
+    <p>AI Sound Design has been successfully installed.</p>
     <p>The plugin is now available in Pro Tools under:</p>
-    <p><strong>Audiosuite → Other → PTV2A</strong></p>
+    <p><strong>Audiosuite → Utility → AI Sound Design</strong></p>
     <p>Please restart Pro Tools if it is currently running.</p>
 </body>
 </html>

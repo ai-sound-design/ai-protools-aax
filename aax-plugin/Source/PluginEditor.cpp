@@ -1,5 +1,23 @@
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
+#include "SettingsPanel.h"
+
+namespace
+{
+    // One segment of a segmented switch: a text button that stays lit while it is
+    // the selected member of its radio group. Used for choices that are mutually
+    // exclusive, where check boxes would suggest several could be ticked at once.
+    void setUpSegment (juce::TextButton& button, int radioGroupId, int connectedEdges)
+    {
+        button.setClickingTogglesState (true);
+        button.setRadioGroupId (radioGroupId);
+        button.setConnectedEdges (connectedEdges);
+        button.setColour (juce::TextButton::buttonOnColourId,  juce::Colour (0xff2f7fe0));
+        button.setColour (juce::TextButton::textColourOnId,    juce::Colours::white);
+        button.setColour (juce::TextButton::buttonColourId,    juce::Colour (0xff353535));
+        button.setColour (juce::TextButton::textColourOffId,   juce::Colour (0xffa8a8a8));
+    }
+}
 
 //==============================================================================
 // Constructor - Initialize GUI Components
@@ -24,23 +42,89 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     modeLabel.setJustificationType (juce::Justification::centredLeft);
     contentComponent.addAndMakeVisible (modeLabel);
     
-    audioGenModeButton.setRadioGroupId (1000);  // Separate group from V2A/T2A
-    audioGenModeButton.setToggleState (true, juce::dontSendNotification);  // Default: Audio Generation
-    audioGenModeButton.onClick = [this] { handleWorkflowModeChange(); };
-    contentComponent.addAndMakeVisible (audioGenModeButton);
-    
-    soundRecModeButton.setRadioGroupId (1000);  // Same group as Audio Generation
-    soundRecModeButton.onClick = [this] { handleWorkflowModeChange(); };
-    contentComponent.addAndMakeVisible (soundRecModeButton);
-    
-    autoSpottingModeButton.setRadioGroupId (1000);  // Same group as other modes
-    autoSpottingModeButton.onClick = [this] { handleWorkflowModeChange(); };
-    contentComponent.addAndMakeVisible (autoSpottingModeButton);
-    
-    // Configure Auto Spotting info label
-    autoSpottingInfoLabel.setJustificationType (juce::Justification::centredLeft);
-    autoSpottingInfoLabel.setVisible (false);  // Initially hidden (only visible in Auto Spotting mode)
-    contentComponent.addAndMakeVisible (autoSpottingInfoLabel);
+    // The four workflows are one segmented switch of three rows, exactly one lit:
+    //   Spotting                        (find the sound events)
+    //   Sound Generation     |
+    //                        | Hybrid   (one generated sound per event)
+    //   Sound Recommendation |
+    setUpSegment (autoSpottingModeButton, 1000, juce::Button::ConnectedOnBottom);
+    setUpSegment (audioGenModeButton,     1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnBottom | juce::Button::ConnectedOnRight);
+    setUpSegment (soundRecModeButton,     1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnRight);
+    setUpSegment (hybridModeButton,       1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnLeft);
+    audioGenModeButton.setToggleState (true, juce::dontSendNotification);  // Default: Sound Generation
+    for (auto* button : { &autoSpottingModeButton, &audioGenModeButton, &soundRecModeButton, &hybridModeButton })
+    {
+        button->onClick = [this] { handleWorkflowModeChange(); };
+        contentComponent.addAndMakeVisible (*button);
+    }
+
+    // Hybrid: whether the session's memory locations define the sound events
+    useMemoryLocationsToggle.setToggleState (true, juce::dontSendNotification);
+    useMemoryLocationsToggle.setTooltip ("On: the memory locations inside the selection (a spotting run, or markers you "
+                                         "set) are the sound events. Off: the backend finds the events itself.");
+    useMemoryLocationsToggle.setVisible (false);
+    useMemoryLocationsToggle.onClick = [this] { autoSpotToggle.setEnabled (useMemoryLocationsToggle.getToggleState()
+                                                                            && useMemoryLocationsToggle.isEnabled()); };
+    contentComponent.addAndMakeVisible (useMemoryLocationsToggle);
+    autoSpotToggle.setToggleState (true, juce::dontSendNotification);
+    autoSpotToggle.setTooltip ("On: a clip in the selection without memory locations is spotted by the backend first. "
+                               "Off: such a clip is skipped.");
+    autoSpotToggle.setVisible (false);
+    contentComponent.addAndMakeVisible (autoSpotToggle);
+
+    // Hybrid: library recordings that sound like the generated sounds, next to or instead of them
+    useDatabaseSoundsToggle.setTooltip ("On: for every generated sound the backend also finds library recordings "
+                                        "that sound like it, stitched from at most the pieces per 10 s set in Settings, "
+                                        "and places them on a track underneath the generated one.");
+    useDatabaseSoundsToggle.setVisible (false);
+    useDatabaseSoundsToggle.onClick = [this] { replaceGeneratedToggle.setEnabled (useDatabaseSoundsToggle.getToggleState()
+                                                                                && useDatabaseSoundsToggle.isEnabled()); };
+    contentComponent.addAndMakeVisible (useDatabaseSoundsToggle);
+    replaceGeneratedToggle.setTooltip ("On: only the library pieces are placed, the generated sound stays out "
+                                       "(it is still placed when nothing matched).");
+    replaceGeneratedToggle.setEnabled (false);
+    replaceGeneratedToggle.setVisible (false);
+    contentComponent.addAndMakeVisible (replaceGeneratedToggle);
+
+    // (i) next to the mode switch: hover for what the mode does, click for the same text as a dialog
+    audioGenModeButton.setTooltip (modeDescription (WorkflowMode::AudioGeneration));
+    soundRecModeButton.setTooltip (modeDescription (WorkflowMode::SoundRecommendation));
+    autoSpottingModeButton.setTooltip (modeDescription (WorkflowMode::AutoSpotting));
+    modeInfoButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff353535));
+    modeInfoButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xffa8a8a8));
+    modeInfoButton.onClick = [this]
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon,
+                                                modeInfoTitle(), modeDescription (currentWorkflowMode), "OK");
+    };
+    contentComponent.addAndMakeVisible (modeInfoButton);
+    updateModeInfo();
+
+    // Spotting only: the whole video track, after a word about how long that takes
+    spotWholeTrackButton.onClick = [this]
+    {
+        juce::AlertWindow::showOkCancelBox (
+            juce::MessageBoxIconType::QuestionIcon,
+            "Spot the entire track?",
+            "Every clip on the video track is analysed one after another.\n\n"
+            "Expect roughly half a minute per clip while the backend is warm, and a few "
+            "minutes for the first clip if the backend has to load its model.",
+            "Start", "Cancel", this,
+            juce::ModalCallbackFunction::create ([this] (int result)
+            {
+                if (result == 1)
+                    startSpotting (true);
+            }));
+    };
+    contentComponent.addChildComponent (spotWholeTrackButton);   // shown in spotting mode only
+
+    // Progress of multi-clip runs; shown while a run is active
+    progressBar.setPercentageDisplay (false);
+    progressBar.setColour (juce::ProgressBar::foregroundColourId, juce::Colour (0xff2f7fe0));   // same blue as the lit segment
+    progressBar.setColour (juce::ProgressBar::backgroundColourId, juce::Colour (0xff2a2a2a));
+    progressLabel.setJustificationType (juce::Justification::centred);
+    contentComponent.addChildComponent (progressBar);
+    contentComponent.addChildComponent (progressLabel);
 
     // Configure unified action button (changes based on workflow mode)
     actionButton.onClick = [this]
@@ -51,6 +135,8 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
             handleRecommendSoundsButtonClicked();
         else if (currentWorkflowMode == WorkflowMode::AutoSpotting)
             handleAutoSpottingButtonClicked();
+        else if (currentWorkflowMode == WorkflowMode::Hybrid)
+            handleHybridButtonClicked();
     };
     contentComponent.addAndMakeVisible (actionButton);
     
@@ -62,8 +148,8 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     contentComponent.addAndMakeVisible (openLogButton);
 
     // Configure settings button with click handler
-    settingsButton.onClick = [this] { showCredentialDialog(); };
-    contentComponent.addAndMakeVisible (settingsButton);
+    settingsButton.onClick = [this] { showSettings(); };
+contentComponent.addAndMakeVisible (settingsButton);
     
     // Configure API warning label
     apiWarningLabel.setJustificationType (juce::Justification::centredLeft);
@@ -80,18 +166,16 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     {
         handleSoundImport (sound);
     };
+    soundRecommendations.onPreview = [this] (const SoundResult& sound, bool start)
+    {
+        if (start)
+            startSoundPreview (sound);
+        else
+            processor.stopSoundPreview();
+    };
+    soundRecommendations.isPreviewPlaying = [this] { return processor.isSoundPreviewPlaying(); };
     contentComponent.addAndMakeVisible (soundRecommendations);
 
-    // First-launch check: show dialog if credentials are missing
-    if (processor.getCloudflareClientSecret().isEmpty())
-    {
-    // Delay dialog to avoid showing during plugin initialization
-    juce::Timer::callAfterDelay (500, [this]
-    {
-        showCredentialDialog();
-    });
-}
-    
     // Configure video offset label (deprecated TODO remove in future)
     // videoOffsetLabel.setJustificationType (juce::Justification::centredLeft);
     // addAndMakeVisible (videoOffsetLabel);
@@ -121,34 +205,26 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     // Configure seed input
     seedInput.setMultiLine (false);
     seedInput.setReturnKeyStartsNewLine (false);
-    seedInput.setTextToShowWhenEmpty ("42", juce::Colours::grey);
-    seedInput.setText ("42");  // Set default value
+    seedInput.setTextToShowWhenEmpty ("-1 = random", juce::Colours::grey);
+    seedInput.setText ("-1");  // Default: a fresh random seed per run
+    seedInput.setTooltip ("-1 (or empty): a random seed each run; the seed used is logged and part of the file name. "
+                          "Any other number reproduces a result.");
     contentComponent.addAndMakeVisible (seedInput);
     
     // Configure generation mode radio buttons (V2A vs T2A)
-    v2aModeButton.setRadioGroupId (1001);
+    setUpSegment (v2aModeButton, 1001, juce::Button::ConnectedOnRight);
+    setUpSegment (t2aModeButton, 1001, juce::Button::ConnectedOnLeft);
     v2aModeButton.setToggleState (true, juce::dontSendNotification);  // Default: V2A mode
     v2aModeButton.onClick = [this] { handleGenerationModeChange(); };
-    contentComponent.addAndMakeVisible (v2aModeButton);
-    
-    t2aModeButton.setRadioGroupId (1001);
     t2aModeButton.onClick = [this] { handleGenerationModeChange(); };
+    contentComponent.addAndMakeVisible (v2aModeButton);
     contentComponent.addAndMakeVisible (t2aModeButton);
-    
+
     // Configure duration dropdown (for T2A mode)
     durationLabel.setJustificationType (juce::Justification::centredLeft);
     contentComponent.addAndMakeVisible (durationLabel);
     
-    durationComboBox.addItem ("4s", 1);
-    durationComboBox.addItem ("5s", 2);
-    durationComboBox.addItem ("6s", 3);
-    durationComboBox.addItem ("7s", 4);
-    durationComboBox.addItem ("8s", 5);
-    durationComboBox.addItem ("9s", 6);
-    durationComboBox.addItem ("10s", 7);
-    durationComboBox.addItem ("11s", 8);
-    durationComboBox.addItem ("12s", 9);
-    durationComboBox.setSelectedId (5, juce::dontSendNotification);  // Default: 8s
+    // Items come from the selected backend's profile, see applyAdapterCapabilities()
     durationComboBox.setEnabled (false);  // Initially disabled (V2A mode)
     contentComponent.addAndMakeVisible (durationComboBox);
     
@@ -161,23 +237,20 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     contentComponent.addAndMakeVisible (modelLabel);
     
     // Configure model ComboBox with integrated sizes
-    modelProviderComboBox.addItem ("MMAudio", 1);
-    modelProviderComboBox.addItem ("HunyuanVideo-Foley (XL)", 2);
-    modelProviderComboBox.addItem ("HunyuanVideo-Foley (XXL)", 3);
-    modelProviderComboBox.setSelectedId (1, juce::dontSendNotification);  // Default: MMAudio
+    modelProviderComboBox.onChange = [this] { handleAdapterChanged(); };
     contentComponent.addAndMakeVisible (modelProviderComboBox);
+    refreshAdapterCombo();
     
     // Configure toggle button for sound recommendations
     toggleSoundResultsButton.onClick = [this] { handleToggleSoundResults(); };
-    toggleSoundResultsButton.setVisible (false);  // Initially hidden until results available
-    contentComponent.addAndMakeVisible (toggleSoundResultsButton);
-    
+    contentComponent.addChildComponent (toggleSoundResultsButton);  // hidden until a search has results
+
     // Initial UI state based on default workflow mode
     handleWorkflowModeChange();
     
-    // Update API credential status warning
-    updateAPICredentialStatus();
-    
+    updateBackendStatus();
+    refreshBackendAvailability();
+
     // Sound recommendations initially hidden
     soundRecommendations.setVisible (false);
     
@@ -185,7 +258,7 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     // Pro Tools plugins typically have fixed UI layouts
     setResizable (true, true);
     setResizeLimits (400, 400, 1200, 1200);  // min/max width/height
-    setSize (750, 600);  // Width x Height in pixels (increased for model selection row)
+    setSize (750, 660);  // Width x Height in pixels; matches the content height computed in resized()
 }
 
 //==============================================================================
@@ -197,30 +270,20 @@ void PtV2AEditor::handleRenderButtonClicked()
     juce::Logger::writeToLog ("Prompt: " + prompt.getText());
     juce::Logger::writeToLog ("Mode: " + juce::String (isT2AMode ? "T2A" : "V2A"));
     
-    // Check if credentials are saved
-    if (processor.getCloudflareClientSecret().isEmpty())
-    {
-        juce::AlertWindow::showMessageBoxAsync (
-            juce::MessageBoxIconType::WarningIcon,
-            "Error: No API Connection",
-            "Please save the correct API credentials under API Settings before rendering audio.\n\n"
-            "Click 'API Settings' at the bottom right to configure your credentials.",
-            "OK"
-        );
+    if (! tunnelTokenPresent ("rendering audio"))
         return;
-    }
-    
+
     // T2A mode validation and workflow
     if (isT2AMode)
     {
-        // Validate model selection
-        if (modelProviderComboBox.getSelectedId() != 1)  // Not MMAudio
+        // The adapter must be able to generate from text alone
+        if (auto adapter = currentAdapter(); adapter.isValid() && ! adapter.supportsFeature ("text_only"))
         {
             juce::AlertWindow::showMessageBoxAsync (
                 juce::MessageBoxIconType::WarningIcon,
-                "Invalid Model Selection",
-                "T2A mode only supports MMAudio.\n\n"
-                "HunyuanVideo-Foley requires video input (V2A mode).",
+                "Backend Needs a Video",
+                adapter.name + " cannot generate from text alone.\n\n"
+                "Choose a backend whose profile lists \"text_only\", or switch to V2A.",
                 "OK"
             );
             return;
@@ -239,11 +302,10 @@ void PtV2AEditor::handleRenderButtonClicked()
     // Step 1: Check API availability (uses config.json for cloudflared support)
     //==========================================================================
     // Determine which API to check based on selected provider
-    int providerSelectedId = modelProviderComboBox.getSelectedId();
-    juce::String serviceName = (providerSelectedId == 2) ? "hunyuan" : "mmaudio";
-    juce::String providerDisplayName = (providerSelectedId == 2) ? "HunyuanVideo-Foley" : "MMAudio";
-    
-    juce::String apiUrl = processor.getConfiguredAPIUrl (serviceName);
+    auto adapter = currentAdapter();
+    juce::String providerDisplayName = adapter.isValid() ? adapter.name : juce::String ("The generation backend");
+    juce::String apiUrl = adapter.isValid() ? adapter.activeUrl (processor.getBackendSettings().useTunnel)
+                                            : processor.getConfiguredAPIUrl ("mmaudio");
     if (!processor.isAPIAvailable (apiUrl))
     {
         juce::AlertWindow::showMessageBoxAsync (
@@ -256,19 +318,17 @@ void PtV2AEditor::handleRenderButtonClicked()
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         return;
     }
     
     //==========================================================================
-    // Step 2: Start async timeline selection read (non-blocking!)
+    // Step 2: which video clips lie under the timeline selection? (async)
     //==========================================================================
-    actionButton.setButtonText ("Reading Selection...");
-    actionButton.setEnabled (false);
-    
-    // Start async PTSL process - timer will handle the rest!
-    // The workflow continues in handleTimelineSelectionResult() after PTSL finishes
-    startTimelineSelectionRead();
+    // The selection may be on any track. Every clip beneath it is generated for
+    // in turn and imported at its own position (handleVideoSegmentsResult).
+    currentPrompt = prompt.getText();
+    startVideoSegmentResolve (ResolveTarget::Generation);
 }
 
 //==============================================================================
@@ -280,7 +340,14 @@ void PtV2AEditor::handleOpenLogButtonClicked()
     
     // Get log file path from processor
     auto logFile = PtV2AProcessor::getLogFile();
-    
+
+    if (logFile == juce::File())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Log Saving Is Off",
+                                                "Turn on \"Save a log file\" in the settings to write a log.", "OK");
+        return;
+    }
+
     if (!logFile.existsAsFile())
     {
         juce::AlertWindow::showMessageBoxAsync (
@@ -347,7 +414,7 @@ void PtV2AEditor::handleT2ARenderButtonClicked()
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         return;
     }
     
@@ -373,23 +440,32 @@ void PtV2AEditor::resized()
     // Viewport takes full editor bounds
     viewport.setBounds (getLocalBounds());
     
-    // Calculate content height (sum of all components + spacing + margins)
+    // Rows that the current mode hides take no space, so the Sound Recommendation
+    // list gets the room the generation parameters would otherwise occupy.
+    const bool isAudioGen = currentWorkflowMode == WorkflowMode::AudioGeneration;
+    const bool isSoundRec = currentWorkflowMode == WorkflowMode::SoundRecommendation;
+    const bool isHybrid   = currentWorkflowMode == WorkflowMode::Hybrid;
+    const int audioRows = (isAudioGen || isHybrid) ? 1 : 0;         // negative prompt, seed
+    const int hybridRows = isHybrid ? 2 : 0;                         // event switches, database switches
+    const int promptRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 0 : 1;   // no prompt in Spotting
+    const int toggleHeight = (isSoundRec && toggleSoundResultsButton.isVisible()) ? 28 : 0;
+    const int resultsHeight = (isSoundRec && soundRecommendations.isVisible())
+                                  ? SoundRecommendationsComponent::heightForRows (8) : 0;
+
     int contentHeight = 24 +  // Top margin
-                        28 +  // Mode row
-                        20 +  // Spacing
-                        28 +  // Prompt row (or Auto Spotting info label - same space)
-                        20 +  // Spacing
-                        28 +  // Negative prompt row
-                        20 +  // Spacing
-                        28 +  // Seed row
-                        20 +  // Spacing
-                        28 +  // Model row
-                        60 +  // Spacing before buttons
+                        3 * 28 +  // Mode switch, three rows
+                        (20 + 28) * promptRows +  // Prompt row (all modes but Spotting)
+                        (20 + 28) * audioRows +  // Negative prompt row
+                        (20 + 28) * audioRows +  // Seed row
+                        (20 + 28) +  // Backend row (every mode)
+                        (20 + 28) * hybridRows +  // Hybrid switches: events row, database row
+                        30 +  // Spacing before buttons
                         28 +  // Button row
+                        8 + 28 +  // Whole-track button row
+                        8 + 16 + 20 +  // Progress bar and label
                         15 +  // Spacing
-                        28 +  // Toggle button row
-                        10 +  // Spacing
-                        140 + // Sound recommendations component
+                        toggleHeight +           // Toggle button row
+                        (resultsHeight > 0 ? 10 + resultsHeight : 0) + // Sound recommendations list
                         10 +  // Spacing
                         28 +  // Settings button row
                         24;   // Bottom margin
@@ -402,50 +478,41 @@ void PtV2AEditor::resized()
     // Layout components within contentComponent with 24px margin around edges
     auto r = contentComponent.getLocalBounds().reduced (24);
     
-    // Mode selection row at the top - use proportional layout with even spacing
-    auto modeRow = r.removeFromTop (28);
-    modeLabel.setBounds (modeRow.removeFromLeft (65));
-    modeRow.removeFromLeft (10);
-    int availableWidth = modeRow.getWidth();
-    int buttonGap = 15;
-    int buttonWidth = (availableWidth - 2 * buttonGap) / 3;  // Even width for all three buttons
-    audioGenModeButton.setBounds (modeRow.removeFromLeft (buttonWidth));
-    modeRow.removeFromLeft (buttonGap);
-    soundRecModeButton.setBounds (modeRow.removeFromLeft (buttonWidth));
-    modeRow.removeFromLeft (buttonGap);
-    autoSpottingModeButton.setBounds (modeRow.removeFromLeft (buttonWidth));
+    // Mode switch at the top: one block of three rows, label and (i) beside it
+    auto modeBlock = r.removeFromTop (3 * 28);
+    modeLabel.setBounds (modeBlock.removeFromLeft (65).removeFromTop (28));
+    modeBlock.removeFromLeft (10);
+    modeInfoButton.setBounds (modeBlock.removeFromRight (24).withSizeKeepingCentre (24, 24));   // the (i)
+    modeBlock.removeFromRight (8);
+    autoSpottingModeButton.setBounds (modeBlock.removeFromTop (28));
+    auto leftColumn = modeBlock.removeFromLeft (modeBlock.getWidth() / 2);
+    audioGenModeButton.setBounds (leftColumn.removeFromTop (28));
+    soundRecModeButton.setBounds (leftColumn);
+    hybridModeButton.setBounds (modeBlock);   // spans both rows beside the two
     
-    // 20px spacing after mode selection
-    r.removeFromTop (20);
-    
-    // Prompt text input OR Auto Spotting info label (share same space)
-    auto promptRow = r.removeFromTop (28);
-    
-    // Auto Spotting info label (positioned where prompt is, only visible in Auto Spotting mode)
-    auto autoSpottingInfoRow = promptRow;
-    autoSpottingInfoRow.removeFromLeft (65);  // Skip label area to align with prompt field
-    autoSpottingInfoRow.removeFromLeft (10);  // Skip spacing
-    autoSpottingInfoLabel.setBounds (autoSpottingInfoRow);
-    
+    // Prompt row (collapsed in Spotting, which has no text input)
+    r.removeFromTop (20 * promptRows);
+    auto promptRow = r.removeFromTop (28 * promptRows);
+
     // Prompt text input: full width, 28px height
     promptLabel.setBounds (promptRow.removeFromLeft (65));
     promptRow.removeFromLeft (10);    
     prompt.setBounds (promptRow);
 
-    // 20px spacing between components
-    r.removeFromTop (20);
- 
+    // 20px spacing between components (collapsed outside Sound Generation and Hybrid)
+    r.removeFromTop (20 * audioRows);
+
     // Negative prompt row: Label + Input field
-    auto negativePromptRow = r.removeFromTop (28);
+    auto negativePromptRow = r.removeFromTop (28 * audioRows);
     negativePromptLabel.setBounds (negativePromptRow.removeFromLeft (65));
     negativePromptRow.removeFromLeft (10);
     negativePromptInput.setBounds (negativePromptRow);
 
-    // 20px spacing before next row
-    r.removeFromTop (20);
-    
+    // 20px spacing before next row (collapsed outside Sound Generation and Hybrid)
+    r.removeFromTop (20 * audioRows);
+
     // Seed and generation mode row: Label + Input + Radio Buttons + Duration - responsive layout
-    auto seedRow = r.removeFromTop (28);
+    auto seedRow = r.removeFromTop (28 * audioRows);
     seedLabel.setBounds (seedRow.removeFromLeft (65));
     seedRow.removeFromLeft (10);
     
@@ -458,11 +525,10 @@ void PtV2AEditor::resized()
     int v2aWidth = juce::jmin (140, remainingWidth * 3 / 10);  // Roughly 30% or 140px
     int t2aWidth = juce::jmin (130, remainingWidth * 3 / 10);  // Roughly 30% or 130px
     
-    // Radio buttons for V2A/T2A mode
+    // Segmented switch for V2A/T2A mode
     v2aModeButton.setBounds (seedRow.removeFromLeft (v2aWidth));
-    seedRow.removeFromLeft (10);
     t2aModeButton.setBounds (seedRow.removeFromLeft (t2aWidth));
-    seedRow.removeFromLeft (20);
+seedRow.removeFromLeft (20);
     
     // Duration controls (only active in T2A mode) - use remaining space
     if (seedRow.getWidth() > 155)  // Only show if enough space
@@ -478,15 +544,29 @@ void PtV2AEditor::resized()
         durationComboBox.setBounds (seedRow);
     }
     
-    // 20px spacing before model selection
+    // 20px spacing before the backend row
     r.removeFromTop (20);
-    
-    // Model selection row: Label + Model ComboBox (with integrated sizes)
+
+    // Backend row: Label + adapter list (every mode)
     auto modelRow = r.removeFromTop (28);
     modelLabel.setBounds (modelRow.removeFromLeft (65));
     modelRow.removeFromLeft (10);
     modelProviderComboBox.setBounds (modelRow.removeFromLeft (230));
-    // highPrecisionModeToggle.setBounds (modelRow); // (deprecated TODO remove in future)
+
+    // Hybrid: the event switches and the database switches under the backend row (collapsed elsewhere)
+    const int hybridRowHeight = isHybrid ? 28 : 0;
+    r.removeFromTop (isHybrid ? 20 : 0);
+    auto memoryRow = r.removeFromTop (hybridRowHeight);
+    memoryRow.removeFromLeft (75);
+    useMemoryLocationsToggle.setBounds (memoryRow.removeFromLeft (230));
+    memoryRow.removeFromLeft (20);
+    autoSpotToggle.setBounds (memoryRow);
+    r.removeFromTop (isHybrid ? 20 : 0);
+    auto databaseRow = r.removeFromTop (hybridRowHeight);
+    databaseRow.removeFromLeft (75);
+    useDatabaseSoundsToggle.setBounds (databaseRow.removeFromLeft (230));
+    databaseRow.removeFromLeft (20);
+    replaceGeneratedToggle.setBounds (databaseRow);
 
 
     // 30px spacing before next row
@@ -501,8 +581,8 @@ void PtV2AEditor::resized()
     // Input field: fixed 80px width (deprecated TODO remove in future)
     // videoOffsetInput.setBounds (offsetRow.removeFromLeft (80));
 
-    // 60px spacing before buttons section
-    r.removeFromTop (60);
+    // 30px spacing before buttons section
+    r.removeFromTop (30);
 
     // Main action button - centered
     auto buttonRow = r.removeFromTop (28);
@@ -510,16 +590,28 @@ void PtV2AEditor::resized()
     buttonRow.removeFromLeft ((buttonRow.getWidth() - actionW) / 2);  // Center
     actionButton.setBounds (buttonRow.removeFromLeft (actionW));
 
+    // Spotting only: whole-track button under the action button
+    r.removeFromTop (8);
+    auto spotAllRow = r.removeFromTop (28);
+    const int spotAllW = 200;
+    spotAllRow.removeFromLeft ((spotAllRow.getWidth() - spotAllW) / 2);
+    spotWholeTrackButton.setBounds (spotAllRow.removeFromLeft (spotAllW));
+
+    // Progress of a running multi-clip operation
+    r.removeFromTop (8);
+    progressBar.setBounds (r.removeFromTop (16).reduced (40, 0));
+    progressLabel.setBounds (r.removeFromTop (20));
+
     // Toggle button for sound recommendations - centered below render button
     r.removeFromTop (15);  // Spacing
-    auto toggleButtonRow = r.removeFromTop (28);
+    auto toggleButtonRow = r.removeFromTop (toggleHeight);
     toggleButtonRow.removeFromLeft ((toggleButtonRow.getWidth() - 200) / 2);  // Center
     toggleSoundResultsButton.setBounds (toggleButtonRow.removeFromLeft (200));
-    
-    // Sound recommendations component - shown when toggle is active
-    r.removeFromTop (10);  // Spacing
-    auto soundRecommendationsArea = r.removeFromTop (140);  // Fixed height for component
-    soundRecommendations.setBounds (soundRecommendationsArea);
+
+    // Sound recommendations list - eight rows when shown, nothing otherwise
+    if (resultsHeight > 0)
+        r.removeFromTop (10);  // Spacing
+    soundRecommendations.setBounds (r.removeFromTop (resultsHeight));
 
     // Settings row at bottom: [Open Log] ... [Warning Label] [API Settings Button]
     auto settingsRow = r.removeFromBottom (28);
@@ -546,79 +638,6 @@ void PtV2AEditor::resized()
 // Async PTSL Communication Implementation
 //==============================================================================
 
-void PtV2AEditor::startTimelineSelectionRead()
-{
-    juce::Logger::writeToLog ("=== Starting Async Timeline Selection Read ===");
-    
-    auto pythonExe = processor.getPythonExecutable();
-    auto scriptFile = processor.getAPIClientScript();
-    
-    if (!scriptFile.existsAsFile())
-    {
-        juce::Logger::writeToLog ("ERROR: API client script not found");
-        
-        juce::AlertWindow::showMessageBoxAsync (
-            juce::MessageBoxIconType::WarningIcon,
-            "Script Error",
-            "API client script not found.\n\n"
-            "Please check plugin installation.",
-            "OK"
-        );
-        
-        actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
-        return;
-    }
-    
-    // Build command: Direct Python call with -X utf8 flag
-    // Use get_video_info to get BOTH timeline selection AND video path in one call
-    juce::StringArray commandArray;
-    commandArray.add (pythonExe);
-    commandArray.add ("-X");
-    commandArray.add ("utf8");
-    commandArray.add (scriptFile.getFullPathName());
-    commandArray.add ("--action");
-    commandArray.add ("get_video_info");
-    
-    juce::Logger::writeToLog ("Starting PTSL process (async)...");
-    juce::Logger::writeToLog ("Command: " + commandArray.joinIntoString (" "));
-    
-    // Create and start process
-    ptslProcess = std::make_unique<juce::ChildProcess>();
-    
-    if (!ptslProcess->start (commandArray))
-    {
-        juce::Logger::writeToLog ("ERROR: Failed to start PTSL process");
-        
-        juce::AlertWindow::showMessageBoxAsync (
-            juce::MessageBoxIconType::WarningIcon,
-            "Process Error",
-            "Failed to start Python process for timeline selection.\n\n"
-            "Please check plugin installation.",
-            "OK"
-        );
-        
-        actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
-        ptslProcess.reset();
-        return;
-    }
-    
-    // Record start time for timeout detection
-    asyncOperationStartTime = juce::Time::getCurrentTime();
-    
-    // IMPORTANT: Only set state if not already set by caller
-    // Sound Search pre-sets ReadingTimelineForSoundSearch before calling this function
-    if (currentAsyncState == AsyncState::Idle)
-        currentAsyncState = AsyncState::ReadingTimeline;
-    
-    // Start timer to poll process status every 100ms
-    startTimer (TIMER_INTERVAL_MS);
-    
-    juce::Logger::writeToLog ("Timeline selection started, timer polling every " + 
-                              juce::String (TIMER_INTERVAL_MS) + "ms");
-}
-
 //==============================================================================
 // Async PTSL - Timeline Selection Read Only (T2A workflow - no video required)
 //==============================================================================
@@ -643,7 +662,7 @@ void PtV2AEditor::startTimelineSelectionReadOnly()
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         return;
     }
     
@@ -675,7 +694,7 @@ void PtV2AEditor::startTimelineSelectionReadOnly()
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         ptslProcess.reset();
         return;
     }
@@ -735,7 +754,7 @@ void PtV2AEditor::timerCallback()
                 );
                 
                 actionButton.setEnabled (true);
-                actionButton.setButtonText ("Render Audio");
+                actionButton.setButtonText ("Generate Sound");
                 return;
             }
             
@@ -761,209 +780,50 @@ void PtV2AEditor::timerCallback()
             break;
         }
         
-        case AsyncState::ReadingTimelineForSoundSearch:
+        case AsyncState::ResolvingVideoSegments:
         {
-            // Same as ReadingTimeline but triggers sound search instead of audio generation
-            if (!ptslProcess)
+            // standalone_api_client.py --action resolve_video_segments bisects the timeline
+            // selection over PTSL: a few seconds per clip boundary, so a generous limit.
+            constexpr int resolveTimeoutMs = 120000;
+
+            if (! ptslProcess)
             {
                 stopTimer();
-                currentAsyncState = AsyncState::Idle;
-                actionButton.setEnabled (true);
-                actionButton.setButtonText ("Recommend Sounds");
+                resetActionUi();
                 return;
             }
-            
-            // Check for timeout
-            if (elapsed.inMilliseconds() > PTSL_TIMEOUT_MS)
+
+            if (elapsed.inMilliseconds() > resolveTimeoutMs)
             {
-                juce::Logger::writeToLog ("ERROR: Timeline selection timed out after " + 
-                                          juce::String (PTSL_TIMEOUT_MS) + "ms");
-                
+                juce::Logger::writeToLog ("ERROR: resolve_video_segments timed out");
                 stopTimer();
                 ptslProcess->kill();
                 ptslProcess.reset();
-                currentAsyncState = AsyncState::Idle;
-                
+
                 juce::AlertWindow::showMessageBoxAsync (
                     juce::MessageBoxIconType::WarningIcon,
                     "Timeout",
-                    "Timeline selection timed out for sound search.\n\n"
-                    "Please check PTSL connection.",
+                    "Reading the selection from Pro Tools timed out.\n\n"
+                    "Make sure Pro Tools is running with PTSL enabled.",
                     "OK"
                 );
-                
-                actionButton.setEnabled (true);
-                actionButton.setButtonText ("Recommend Sounds");
+                resetActionUi();
                 return;
             }
-            
-            // Check if process is still running
+
             if (ptslProcess->isRunning())
-            {
-                return;  // Keep waiting
-            }
-            
-            // Process finished - read output
-            juce::Logger::writeToLog ("Timeline selection for sound search finished after " + 
-                                      juce::String (elapsed.inMilliseconds()) + "ms");
-            
+                return;
+
             auto output = ptslProcess->readAllProcessOutput();
             ptslProcess.reset();
             stopTimer();
-            currentAsyncState = AsyncState::Idle;
-            
-            // Parse JSON to get video path
-            auto lines = juce::StringArray::fromLines (output);
-            juce::String jsonOutput;
-            for (const auto& line : lines)
-            {
-                if (line.trimStart().startsWith ("{"))
-                {
-                    jsonOutput = line.trim();
-                    break;
-                }
-            }
-            
-            juce::String videoPath;
-            float durationSeconds = 0.0f;
-            if (jsonOutput.isNotEmpty())
-            {
-                auto json = juce::JSON::parse (jsonOutput);
-                if (auto* obj = json.getDynamicObject())
-                {
-                    bool success = obj->getProperty ("success");
-                    if (success)
-                    {
-                        videoPath = obj->getProperty ("video_path").toString();
-                        juce::Logger::writeToLog ("Video path from PTSL: " + videoPath);
-                        
-                        // Get selection duration
-                        durationSeconds = obj->getProperty ("duration_seconds");
-                        juce::Logger::writeToLog ("Selection duration: " + juce::String (durationSeconds, 2) + "s");
-                        
-                        // Store timeline position for sound import (same as V2A/T2A)
-                        juce::String inTime = obj->getProperty ("in_time").toString();
-                        if (inTime.isNotEmpty())
-                        {
-                            timelineInTime = inTime;
-                            juce::Logger::writeToLog ("Stored timeline in-time for sound import: " + timelineInTime);
-                        }
-                    }
-                    else
-                    {
-                        juce::String error = obj->getProperty ("error").toString();
-                        bool noSelection = error.contains ("No clips selected");
-                        
-                        if (noSelection)
-                        {
-                            juce::Logger::writeToLog ("No video selected - using text-only search");
-                        }
-                        else
-                        {
-                            juce::Logger::writeToLog ("PTSL error: " + error);
-                            juce::AlertWindow::showMessageBoxAsync (
-                                juce::MessageBoxIconType::WarningIcon,
-                                "Video Error",
-                                error,
-                                "OK"
-                            );
-                            actionButton.setEnabled (true);
-                            actionButton.setButtonText ("Recommend Sounds");
-                            return;
-                        }
-                    }
-                }
-            }
-            
-            // Validate video duration if video is available (4-12 seconds for optimal X-CLIP processing)
-            if (videoPath.isNotEmpty() && durationSeconds > 0.0f)
-            {
-                if (durationSeconds < 4.0f)
-                {
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::WarningIcon,
-                        "Selection Too Short",
-                        juce::String::formatted (
-                            "Timeline selection is only %.2f seconds.\n\n"
-                            "Sound Search requires video clips between 4-12 seconds.\n\n"
-                            "Please select a longer video clip.",
-                            durationSeconds
-                        ),
-                        "OK"
-                    );
-                    
-                    actionButton.setEnabled (true);
-                    actionButton.setButtonText ("Recommend Sounds");
-                    return;
-                }
-                
-                if (durationSeconds > 12.0f)
-                {
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::WarningIcon,
-                        "Selection Too Long",
-                        juce::String::formatted (
-                            "Timeline selection is %.2f seconds.\n\n"
-                            "Sound Search requires video clips between 4-12 seconds.\n\n"
-                            "Please:\n"
-                            "1. Select a shorter video clip\n"
-                            "2. Cut your current clip into segments of 4-12 seconds each",
-                            durationSeconds
-                        ),
-                        "OK"
-                    );
-                    
-                    actionButton.setEnabled (true);
-                    actionButton.setButtonText ("Recommend Sounds");
-                    return;
-                }
-                
-                juce::Logger::writeToLog ("Video duration valid for sound search: " + juce::String (durationSeconds, 2) + "s");
-            }
-            
-            // Validate: need at least video OR text
-            if (videoPath.isEmpty() && currentPrompt.isEmpty())
-            {
-                juce::AlertWindow::showMessageBoxAsync (
-                    juce::MessageBoxIconType::WarningIcon,
-                    "No Input",
-                    "No video or text prompt available for sound search.",
-                    "OK"
-                );
-                actionButton.setEnabled (true);
-                actionButton.setButtonText ("Recommend Sounds");
-                return;
-            }
-            
-            // If video is available, read clip bounds first (same workflow as Audio Generation)
-            if (videoPath.isNotEmpty())
-            {
-                juce::Logger::writeToLog ("Starting clip bounds read for sound search...");
-                // Store video path for use after clip bounds read
-                currentVideoPath = videoPath;
-                currentAsyncState = AsyncState::ReadingClipBoundsForSoundSearch;
-                asyncOperationStartTime = juce::Time::getCurrentTime();
-                startTimer (TIMER_INTERVAL_MS);
-                startClipBoundsRead (videoPath);
-                return;
-            }
-            
-            // Text-only search (no video) - trigger immediately with no clip bounds
-            juce::Logger::writeToLog ("Text-only search - no clip bounds needed");
-            triggerSoundSearch (
-                "",                              // No video
-                currentPrompt,
-                "",                              // Video offset
-                0.0f,                            // Timeline start
-                0.0f,                            // Timeline end
-                -1.0f,                           // No clip start
-                -1.0f,                           // No clip end
-                false                            // No auto-detect
-            );
-            
+            juce::Logger::writeToLog ("resolve_video_segments finished after "
+                                      + juce::String (elapsed.inSeconds(), 1) + "s");
+            juce::Logger::writeToLog (output);
+            handleVideoSegmentsResult (output);
             break;
         }
-        
+
         case AsyncState::ReadingTimelineForSoundImport:
         {
             // Reading timeline position for sound import (before actual import)
@@ -994,6 +854,7 @@ void PtV2AEditor::timerCallback()
                 );
                 
                 // Fallback: Import at default position
+                currentTimecodeOut.clear();
                 startSoundImportProcess (pendingSoundImport, "");
                 return;
             }
@@ -1036,6 +897,7 @@ void PtV2AEditor::timerCallback()
                     // For sound import, we only need timeline position (edit cursor), not a video clip
                     // So extract in_time even if success=false (which means no video clip selected)
                     currentTimecode = obj->getProperty ("in_time").toString();
+                    currentTimecodeOut = obj->getProperty ("out_time").toString();
                     
                     if (currentTimecode.isNotEmpty() && currentTimecode != "00:00:00:00")
                     {
@@ -1052,101 +914,6 @@ void PtV2AEditor::timerCallback()
             // Now start the actual import with current timeline position
             startSoundImportProcess (pendingSoundImport, currentTimecode);
             
-            break;
-        }
-        
-        case AsyncState::ReadingClipBounds:
-        {
-            // Safety check
-            if (!ptslProcess)
-            {
-                stopTimer();
-                currentAsyncState = AsyncState::Idle;
-                return;
-            }
-            
-            // Check for timeout
-            if (elapsed.inMilliseconds() > PTSL_TIMEOUT_MS)
-            {
-                juce::Logger::writeToLog ("ERROR: Clip bounds read timed out after " + 
-                                          juce::String (PTSL_TIMEOUT_MS) + "ms");
-                
-                stopTimer();
-                ptslProcess->kill();
-                ptslProcess.reset();
-                currentAsyncState = AsyncState::Idle;
-                
-                juce::Logger::writeToLog ("Clip bounds read timed out - aborting");
-                
-                actionButton.setEnabled (true);
-                actionButton.setButtonText ("Render Audio");
-                return;
-            }
-            
-            // Check if process is still running
-            if (ptslProcess->isRunning())
-            {
-                // Still running - keep waiting (non-blocking)
-                return;
-            }
-            
-            // Process finished! Read output
-            juce::Logger::writeToLog ("Clip bounds read finished after " + 
-                                      juce::String (elapsed.inMilliseconds()) + "ms");
-            
-            auto output = ptslProcess->readAllProcessOutput();
-            ptslProcess.reset();
-            
-            // Pass output to handler for parsing
-            handleClipBoundsResult (output);
-            break;
-        }
-        
-        case AsyncState::ReadingClipBoundsForSoundSearch:
-        {
-            // Same as ReadingClipBounds but for Sound Search workflow
-            if (!ptslProcess)
-            {
-                stopTimer();
-                currentAsyncState = AsyncState::Idle;
-                actionButton.setEnabled (true);
-                actionButton.setButtonText ("Recommend Sounds");
-                return;
-            }
-            
-            // Check for timeout
-            if (elapsed.inMilliseconds() > PTSL_TIMEOUT_MS)
-            {
-                juce::Logger::writeToLog ("ERROR: Clip bounds read for sound search timed out after " + 
-                                          juce::String (PTSL_TIMEOUT_MS) + "ms");
-                
-                stopTimer();
-                ptslProcess->kill();
-                ptslProcess.reset();
-                currentAsyncState = AsyncState::Idle;
-                
-                actionButton.setEnabled (true);
-                actionButton.setButtonText ("Recommend Sounds");
-                return;
-            }
-            
-            // Check if process is still running
-            if (ptslProcess->isRunning())
-            {
-                return;  // Keep waiting
-            }
-            
-            // Process finished! Read output
-            juce::Logger::writeToLog ("Clip bounds read for sound search finished after " + 
-                                      juce::String (elapsed.inMilliseconds()) + "ms");
-            
-            auto output = ptslProcess->readAllProcessOutput();
-            ptslProcess.reset();
-            stopTimer();
-            currentAsyncState = AsyncState::Idle;
-            
-            // Pass output to handler for parsing (Sound Search variant)
-            handleClipBoundsForSoundSearchResult (output);
             break;
         }
         
@@ -1294,6 +1061,14 @@ void PtV2AEditor::timerCallback()
                     
                     // Mark sound as downloaded in UI component
                     soundRecommendations.markSoundAsDownloaded (soundId, localPath);
+                    if (autoImportSoundId == soundId)
+                    {
+                        autoImportSoundId = -1;
+                        auto sound = currentDownloadingSound;
+                        sound.localPath = localPath;
+                        handleSoundImport (sound);
+                        return;
+                    }
                 }
                 else
                 {
@@ -1317,204 +1092,165 @@ void PtV2AEditor::timerCallback()
             break;
         }
         
-        case AsyncState::AutoSpottingAnalysis:
+        case AsyncState::SpottingAnalysis:
+        case AsyncState::HybridGeneration:
         {
-            // Poll Auto Spotting wizard process (fake progress based on time, avoid stdout reading during PTSL ops)
-            // Timeout: 45 seconds (11s fake delays + 34s safety buffer for Python script)
-            if (elapsed.inMilliseconds() > 45000)
-            {
-                juce::Logger::writeToLog ("ERROR: Auto Spotting wizard timed out after 45s");
-                
-                stopTimer();
-                
-                if (ptslProcess)
-                {
-                    ptslProcess->kill();
-                    ptslProcess.reset();
-                }
-                
-                currentAsyncState = AsyncState::Idle;
-                
-                juce::AlertWindow::showMessageBoxAsync (
-                    juce::MessageBoxIconType::WarningIcon,
-                    "Auto Spotting Timeout",
-                    "Auto Spotting analysis timed out after 45 seconds.\n\n"
-                    "Please check Pro Tools connection and try again.",
-                    "OK"
-                );
-                
-                actionButton.setEnabled (true);
-                actionButton.setButtonText ("Analyze & Spot Markers");
-                return;
-            }
-            
-            // Update button text based on elapsed time (fake progress to avoid stdout polling during PTSL)
-            int elapsedSeconds = elapsed.inMilliseconds() / 1000;
-            if (elapsedSeconds < 3)
-            {
-                actionButton.setButtonText ("Analyzing video...");
-            }
-            else if (elapsedSeconds < 7)
-            {
-                actionButton.setButtonText ("Detecting audio cues...");
-            }
-            else if (elapsedSeconds < 11)
-            {
-                actionButton.setButtonText ("Creating markers...");
-            }
-            else
-            {
-                actionButton.setButtonText ("Finalizing...");
-                
-                // Start Python process after 11s fake delay (only once)
-                if (!ptslProcess)
-                {
-                    juce::Logger::writeToLog ("=== Starting Python Script (after 11s fake delay) ===");
-                    
-                    auto scriptFile = processor.getAPIClientScript();
-                    auto companionDir = scriptFile.getParentDirectory();
-                    auto scriptPath = companionDir.getChildFile ("auto_spotting_wizard.py");
-                    
-                    juce::String pythonExe = processor.getPythonExecutable();
-                    
-                    juce::Logger::writeToLog ("Python executable: " + pythonExe);
-                    juce::Logger::writeToLog ("Script path: " + scriptPath.getFullPathName());
-                    
-                    // Build command: python.exe auto_spotting_wizard.py
-                    juce::StringArray args;
-                    args.add (pythonExe);  // First arg: Python interpreter
-                    args.add (scriptPath.getFullPathName());  // Second arg: Script to run
-                    
-                    juce::Logger::writeToLog ("Full command: " + args.joinIntoString (" "));
-                    
-                    ptslProcess = std::make_unique<juce::ChildProcess>();
-                    
-                    if (!ptslProcess->start (args))
-                    {
-                        juce::Logger::writeToLog ("ERROR: Failed to start Python process");
-                        
-                        stopTimer();
-                        ptslProcess.reset();
-                        currentAsyncState = AsyncState::Idle;
-                        
-                        actionButton.setEnabled (true);
-                        actionButton.setButtonText ("Analyze & Spot Markers");
-                        
-                        juce::AlertWindow::showMessageBoxAsync (
-                            juce::MessageBoxIconType::WarningIcon,
-                            "Failed to Start Script",
-                            "Could not start Auto Spotting wizard script.\n\n"
-                            "Please check the log file for details.",
-                            "OK"
-                        );
-                        
-                        return;
-                    }
-                    
-                    juce::Logger::writeToLog ("Python process started successfully");
-                }
-            }
-            
-            // If process hasn't been started yet (< 11s), keep waiting
+            // spotting_client.py or hybrid_client.py is running: cut, backend call, placement.
+            // A cold backend may have to load its model first, hence the long limit; the
+            // hybrid run generates one sound per event, so it gets longer still.
+            const bool hybrid = currentAsyncState == AsyncState::HybridGeneration;
+            const int spottingTimeoutMs = hybrid ? 1800000 : 600000;
+            const juce::String what = hybrid ? "Hybrid generation" : "Spotting";
+
             if (!ptslProcess)
             {
-                return;  // Keep polling until 11s mark
+                stopTimer();
+                currentAsyncState = AsyncState::Idle;
+                resetSpottingUi();
+                return;
             }
-            
-            // Check if process is still running (don't read stdout to avoid PTSL interference)
-            if (ptslProcess->isRunning())
+
+            const auto sinceProgress = juce::Time::getCurrentTime() - juce::jmax (asyncOperationStartTime, lastProgressTime);
+            if (sinceProgress.inMilliseconds() > spottingTimeoutMs)
             {
-                return;  // Keep polling
-            }
-            
-            // Process finished - check exit code and capture any error output
-            int exitCode = ptslProcess->getExitCode();
-            
-            // Try to read stderr for error messages
-            juce::String errorOutput;
-            if (ptslProcess)
-            {
-                char buffer[4096];
-                int bytesRead = ptslProcess->readProcessOutput (buffer, sizeof(buffer) - 1);
-                if (bytesRead > 0)
-                {
-                    buffer[bytesRead] = '\0';
-                    errorOutput = juce::String (buffer);
-                    juce::Logger::writeToLog ("=== Python Script Output ===");
-                    juce::Logger::writeToLog (errorOutput);
-                    juce::Logger::writeToLog ("=== End Output ===");
-                }
-            }
-            
-            juce::Logger::writeToLog ("Auto Spotting wizard completed after " + 
-                                      juce::String (elapsed.inSeconds(), 1) + "s with exit code " + 
-                                      juce::String (exitCode));
-            
-            stopTimer();
-            ptslProcess.reset();
-            currentAsyncState = AsyncState::Idle;
-            
-            actionButton.setEnabled (true);
-            actionButton.setButtonText ("Analyze & Spot Markers");
-            
-            // Show result based on exit code
-            if (exitCode == 0)
-            {
+                // No progress for ten minutes. The script's own log file survives the kill,
+                // so it can say where it stopped (PTSL, ffmpeg, backend).
+                juce::String lastStage = progressLabel.getText();
+                juce::StringArray scriptLog;
+                scriptLog.addLines (spottingProgressFile.withFileExtension ("log").loadFileAsString());
+                scriptLog.removeEmptyStrings();
+                while (scriptLog.size() > 12)
+                    scriptLog.remove (0);
+
+                juce::Logger::writeToLog ("ERROR: " + what + " timed out. Last stage: " + lastStage);
+                juce::Logger::writeToLog ("Script log tail:\n" + scriptLog.joinIntoString ("\n"));
+                stopTimer();
+                ptslProcess->kill();
+                ptslProcess.reset();
+                currentAsyncState = AsyncState::Idle;
+
                 juce::AlertWindow::showMessageBoxAsync (
-                    juce::MessageBoxIconType::InfoIcon,
-                    "Auto Spotting Complete",
-                    "Analysis complete! Memory locations have been placed at detected audio events.\n\n"
-                    "Check the timeline ruler to see the automatically generated markers.",
+                    juce::MessageBoxIconType::WarningIcon,
+                    what + " Timeout",
+                    "No progress for " + juce::String (spottingTimeoutMs / 60000) + " minutes; the run was stopped.\n\n"
+                    "Last stage: " + (lastStage.isNotEmpty() ? lastStage : juce::String ("unknown")) + "\n\n"
+                    + (scriptLog.isEmpty() ? juce::String ("The script wrote no log.")
+                                           : "Script log:\n" + scriptLog.joinIntoString ("\n")),
                     "OK"
                 );
+                resetSpottingUi();
+                return;
+            }
+
+            if (ptslProcess->isRunning())
+            {
+                updateSpottingProgress();
+                actionButton.setButtonText ((hybrid ? "Generating... (" : "Spotting... (")
+                                            + juce::String ((int) elapsed.inSeconds()) + "s)");
+                return;
+            }
+
+            int exitCode = ptslProcess->getExitCode();
+            auto output = ptslProcess->readAllProcessOutput();
+            ptslProcess.reset();
+            stopTimer();
+            currentAsyncState = AsyncState::Idle;
+
+            // The script keeps its log and its result in files next to the progress
+            // file (the pipe holds only 4 KB and is read after exit, so anything
+            // larger would deadlock). Read both before resetSpottingUi() deletes them.
+            auto scriptLog = spottingProgressFile.withFileExtension ("log").loadFileAsString();
+            auto resultFile = spottingProgressFile.withFileExtension ("result.json");
+            auto resultText = resultFile.existsAsFile() ? resultFile.loadFileAsString() : juce::String();
+            resetSpottingUi();
+
+            juce::Logger::writeToLog (what + " finished after " + juce::String (elapsed.inSeconds(), 1)
+                                      + "s with exit code " + juce::String (exitCode));
+            if (scriptLog.isNotEmpty())
+                juce::Logger::writeToLog (scriptLog);
+            juce::Logger::writeToLog (output);
+
+            juce::String jsonOutput;
+            for (const auto& line : juce::StringArray::fromLines (output))
+                if (line.trimStart().startsWith ("{"))
+                    jsonOutput = line.trim();
+
+            auto json = juce::JSON::parse (jsonOutput);
+            if (resultText.isNotEmpty())
+            {
+                auto fullResult = juce::JSON::parse (resultText);
+                if (fullResult.isObject())
+                    json = fullResult;
+            }
+            if (! json.isObject() && resultText.isEmpty() && scriptLog.isNotEmpty())
+                output = scriptLog;             // so the failure dialog can quote the last log line
+            bool success = exitCode == 0 && (bool) json.getProperty ("success", false);
+
+            if (success && hybrid)
+            {
+                const int placed = (int) json.getProperty ("placed", 0);
+                const int sounds = json.getProperty ("sounds", juce::var()).size();
+                const int clips = (int) json.getProperty ("segments", 1);
+                int failedClips = 0;
+                for (const auto& clip : *json.getProperty ("clips", juce::Array<juce::var>()).getArray())
+                    if (clip.hasProperty ("error"))
+                        ++failedClips;
+                const int dbPieces = (int) json.getProperty ("db_pieces", 0);
+                const int dbPlaced = (int) json.getProperty ("db_placed", 0);
+                const bool replaced = (bool) json.getProperty ("replaced", false);
+                juce::String message = juce::String (placed) + " of " + juce::String (sounds)
+                                       + (replaced ? " sounds replaced by library pieces" : " sounds placed on their own tracks")
+                                       + ", from " + juce::String (clips) + (clips == 1 ? " clip" : " clips");
+                if (dbPieces > 0)
+                    message += "; " + juce::String (dbPlaced) + " of " + juce::String (dbPieces) + " library pieces placed";
+                if (const int markers = (int) json.getProperty ("markers_created", 0); markers > 0)
+                    message += "; " + juce::String (markers) + " memory locations for the events the backend found";
+                if (failedClips > 0)
+                    message += "; " + juce::String (failedClips) + " clip(s) failed, see the log";
+                showStatus (message, failedClips > 0 || placed < sounds || dbPlaced < dbPieces);
+            }
+            else if (success)
+            {
+                int created = (int) json.getProperty ("created", 0);
+                int events = json.getProperty ("events", juce::var()).size();
+                int fellBack = (int) json.getProperty ("fell_back_to_main_ruler", 0);
+                juce::String model = json.getProperty ("model", "").toString();
+
+                int clips = (int) json.getProperty ("segments", 1);
+                int failedClips = 0;
+                for (const auto& clip : *json.getProperty ("clips", juce::Array<juce::var>()).getArray())
+                    if (clip.hasProperty ("error"))
+                        ++failedClips;
+
+                juce::String message = juce::String (created) + " markers placed for " + juce::String (events)
+                                       + " sound events in " + juce::String (clips) + (clips == 1 ? " clip" : " clips");
+                if (failedClips > 0)
+                    message += "; " + juce::String (failedClips) + " clip(s) failed, see the log";
+                if (fellBack > 0)
+                    message += "; " + juce::String (fellBack) + " on the main ruler (marker ruler missing)";
+                if (model.isNotEmpty())
+                    message += "  [" + model + "]";
+                showStatus (message, failedClips > 0);
             }
             else
             {
-                // Parse error output to detect specific issues
-                bool duplicateMarkers = errorOutput.contains ("already used") || 
-                                       errorOutput.contains ("InvalidParameter") ||
-                                       (exitCode == 1 && errorOutput.contains ("created\": 0"));
-                
-                if (duplicateMarkers)
-                {
-                    // User-friendly message for duplicate markers (common in user study)
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::WarningIcon,
-                        "Memory Locations Already Exist",
-                        "Auto Spotting could not create markers because they already exist.\n\n"
-                        "To run Auto Spotting again:\n"
-                        "1. Delete all existing memory locations in Pro Tools\n"
-                        "2. Click 'Analyze & Spot Markers' again\n\n"
-                        "Note: This is a prototype limitation - real implementation would handle duplicates automatically.",
-                        "OK"
-                    );
-                }
-                else
-                {
-                    // Generic error message for other failures
-                    juce::String errorMsg = "Auto Spotting wizard encountered an error.\n\n"
-                                            "Please check the log file for details and ensure:\n"
-                                            "- Pro Tools session is open\n"
-                                            "- PTSL server is running\n"
-                                            "- Memory locations are configured in the script";
-                    
-                    if (errorOutput.isNotEmpty())
-                    {
-                        errorMsg += "\n\nError details:\n" + errorOutput.substring (0, 200);
-                    }
-                    
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::WarningIcon,
-                        "Auto Spotting Failed",
-                        errorMsg,
-                        "OK"
-                    );
-                }
+                juce::String error = json.getProperty ("error", "").toString();
+                if (error.isEmpty())
+                    error = output.trim().fromLastOccurrenceOf ("\n", false, false).substring (0, 300);
+
+                juce::AlertWindow::showMessageBoxAsync (
+                    juce::MessageBoxIconType::WarningIcon,
+                    what + " Failed",
+                    "The run did not complete.\n\n" + error + "\n\n"
+                    "Check that Pro Tools has a video selection, PTSL is enabled, and the "
+                    + (hybrid ? juce::String ("hybrid") : juce::String ("spotting"))
+                    + " backend is reachable at the URL in the settings.",
+                    "OK"
+                );
             }
-            
             break;
         }
-        
+
         case AsyncState::ImportingAudio:
         {
             // Safety check
@@ -1526,15 +1262,20 @@ void PtV2AEditor::timerCallback()
             }
             
             // Check for timeout
-            if (elapsed.inMilliseconds() > PTSL_TIMEOUT_MS)
+            if (elapsed.inMilliseconds() > IMPORT_TIMEOUT_MS)
             {
-                juce::Logger::writeToLog ("ERROR: Audio import timed out after " + 
+                juce::Logger::writeToLog ("ERROR: Audio import timed out after " +
                                           juce::String (PTSL_TIMEOUT_MS) + "ms");
-                
+
                 stopTimer();
                 ptslProcess->kill();
                 ptslProcess.reset();
                 currentAsyncState = AsyncState::Idle;
+                if (! pendingSegments.isEmpty())
+                {
+                    segmentFailed ("import timed out");
+                    return;
+                }
                 
                 juce::AlertWindow::showMessageBoxAsync (
                     juce::MessageBoxIconType::WarningIcon,
@@ -1546,7 +1287,7 @@ void PtV2AEditor::timerCallback()
                 );
                 
                 actionButton.setEnabled (true);
-                actionButton.setButtonText ("Render Audio");
+                actionButton.setButtonText ("Generate Sound");
                 return;
             }
             
@@ -1585,10 +1326,10 @@ void PtV2AEditor::timerCallback()
             }
             
             // Check for timeout (60s same as audio import)
-            if (elapsed.inMilliseconds() > PTSL_TIMEOUT_MS)
+            if (elapsed.inMilliseconds() > IMPORT_TIMEOUT_MS)
             {
-                juce::Logger::writeToLog ("ERROR: Sound import timed out after " + 
-                                          juce::String (PTSL_TIMEOUT_MS) + "ms");
+                juce::Logger::writeToLog ("ERROR: Sound import timed out after " +
+                                          juce::String (IMPORT_TIMEOUT_MS) + "ms");
                 
                 stopTimer();
                 ptslProcess->kill();
@@ -1599,7 +1340,7 @@ void PtV2AEditor::timerCallback()
                     juce::MessageBoxIconType::WarningIcon,
                     "Sound Import Timeout",
                     "Sound import to Pro Tools timed out.\n\n"
-                    "The import process did not complete within 60 seconds.",
+                    "The import process did not complete within 2 minutes.",
                     "OK"
                 );
                 
@@ -1672,7 +1413,7 @@ void PtV2AEditor::handleTimelineSelectionResult (const juce::String& output)
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         return;
     }
     
@@ -1702,7 +1443,7 @@ void PtV2AEditor::handleTimelineSelectionResult (const juce::String& output)
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         return;
     }
     
@@ -1729,14 +1470,13 @@ void PtV2AEditor::handleTimelineSelectionResult (const juce::String& output)
                 "Could not read timeline selection:\n\n" +
                 errorMessage + "\n\n"
                 "Please:\n"
-                "1. Select a video clip in Pro Tools (use Selector Tool)\n"
-                "2. Make sure the clip is 4-12 seconds long\n"
-                "3. Pro Tools must be running with PTSL enabled",
+                "1. Mark a time range on the timeline (Selector tool)\n"
+                "2. Pro Tools must be running with PTSL enabled",
                 "OK"
             );
             
             actionButton.setEnabled (true);
-            actionButton.setButtonText ("Render Audio");
+            actionButton.setButtonText ("Generate Sound");
             return;
         }
         
@@ -1767,158 +1507,12 @@ void PtV2AEditor::handleTimelineSelectionResult (const juce::String& output)
             return;  // Exit here - T2A workflow complete
         }
         
-        //======================================================================
-        // V2A MODE: Continue with video processing
-        //======================================================================
-        juce::Logger::writeToLog ("=== V2A Mode: Processing video clip ===");
-        
-        // Validate duration: 4-12 seconds
-        if (durationSeconds < 4.0f)
-        {
-            juce::AlertWindow::showMessageBoxAsync (
-                juce::MessageBoxIconType::WarningIcon,
-                "Selection Too Short",
-                juce::String::formatted (
-                    "Timeline selection is only %.2f seconds.\n\n"
-                    "V2A requires clip selections between 4-12 seconds.\n\n"
-                    "Please select a longer video clip\n",
-                    durationSeconds
-                ),
-                "OK"
-            );
-            
-            actionButton.setEnabled (true);
-            actionButton.setButtonText ("Render Audio");
-            return;
-        }
-        
-        if (durationSeconds > 12.0f)
-        {
-            juce::AlertWindow::showMessageBoxAsync (
-                juce::MessageBoxIconType::WarningIcon,
-                "Selection Too Long",
-                juce::String::formatted (
-                    "Timeline selection is %.2f seconds.\n\n"
-                    "V2A requires clip selections between 4-12 seconds.\n\n"
-                    "Please:\n"
-                    "1. Select a shorter video clip\n"
-                    "2. Cut your current clip into segments of 4-12 seconds each",
-                    durationSeconds
-                ),
-                "OK"
-            );
-            
-            actionButton.setEnabled (true);
-            actionButton.setButtonText ("Render Audio");
-            return;
-        }
-        
-        // Duration is valid! Continue with workflow...
-        juce::Logger::writeToLog ("Selection duration valid: " + 
-                                  juce::String (durationSeconds, 2) + "s");
-        
-        //======================================================================
-        // Step 3: Video file path (already retrieved in combined action!)
-        //======================================================================
-        // NOTE: We already have videoPath from the combined get_video_info action
-        // No need for separate getVideoFileFromProTools() call (avoids second timeout!)
-        
-        if (videoPath.isEmpty())
-        {
-            juce::Logger::writeToLog ("ERROR: No video path in combined result");
-            
-            juce::AlertWindow::showMessageBoxAsync (
-                juce::MessageBoxIconType::WarningIcon,
-                "No Video Found",
-                "Could not find video file in Pro Tools session:\n\n" +
-                errorMessage + "\n\n"
-                "Make sure:\n"
-                "1. Your Pro Tools session has a video track\n"
-                "2. Video file is imported to the session",
-                "OK"
-            );
-            
-            actionButton.setEnabled (true);
-            actionButton.setButtonText ("Render Audio");
-            currentAsyncState = AsyncState::Idle;
-            return;
-        }
-        
-        juce::Logger::writeToLog ("Video file: " + videoPath);
-        
-        //======================================================================
-        // Step 3.5: Check if clip is trimmed (compare clip duration vs source duration)
-        //======================================================================
-        // COMMENTED OUT: FFprobe check causes timeout on large videos (419MB takes >5s)
-        // Solution: ALWAYS read clip bounds via PTSL (works for trimmed AND untrimmed clips)
-        /*
-        // Get source video duration via FFprobe
-        float sourceVideoDuration = getSourceVideoDuration (videoPath);
-        
-        if (sourceVideoDuration > 0.0f)
-        {
-            juce::Logger::writeToLog ("Source video duration: " + juce::String (sourceVideoDuration, 2) + "s");
-            juce::Logger::writeToLog ("Clip duration: " + juce::String (durationSeconds, 2) + "s");
-            
-            // Check if clip is trimmed (with 0.5s tolerance for rounding)
-            if (durationSeconds < (sourceVideoDuration - 0.5f))
-            {
-                juce::Logger::writeToLog ("→ Clip is TRIMMED (shorter than source)");
-                clipIsTrimmed = true;
-            }
-            else
-            {
-                juce::Logger::writeToLog ("→ Clip uses FULL source video");
-                clipIsTrimmed = false;
-            }
-        }
-        else
-        {
-            juce::Logger::writeToLog ("WARNING: Could not determine source video duration, assuming not trimmed");
-            clipIsTrimmed = false;
-        }
-        */
-        
-        //======================================================================
-        // Step 4: ALWAYS read clip bounds (works for trimmed AND untrimmed clips)
-        //======================================================================
-        // Clip bounds from PTSL work for all cases:
-        // - Trimmed clip: Returns actual source position (e.g. 20-27s)
-        // - Untrimmed clip: Returns full video (e.g. 0-60s)
-        // This is faster and more reliable than FFprobe check
-        
-        juce::Logger::writeToLog ("Reading clip bounds from Pro Tools (works for all clip types)...");
-        
-        actionButton.setButtonText ("Reading Clip Bounds...");
-        
-        // Store video and prompt for later use (after clip bounds are read)
-        currentVideoPath = videoPath;
-        currentPrompt = prompt.getText();
-        
-        // Start async clip bounds reading
-        // The timer will continue running, and handleClipBoundsResult() will proceed to generation
-        currentAsyncState = AsyncState::ReadingClipBounds;
-        startClipBoundsRead (videoPath);
-        return;  // Exit here, will continue in handleClipBoundsResult()
-        
-        //======================================================================
-        // Step 5: Start async audio generation (NO PTSL import yet!)
-        //======================================================================
-        actionButton.setButtonText ("Generating Audio...");
-        juce::Logger::writeToLog ("Starting async audio generation...");
-        juce::Logger::writeToLog ("Selected clip: " + inTime + " - " + outTime);
-        juce::Logger::writeToLog ("Duration: " + juce::String (durationSeconds, 2) + "s");
-        juce::Logger::writeToLog ("Video file: " + videoPath);
-        juce::Logger::writeToLog ("Prompt: " + prompt.getText());
-        
-        // Start async audio generation (will poll for output file)
-        startAudioGeneration (videoPath, prompt.getText());
-        
-        // Log generation start (no modal popup to avoid freezing)
-        juce::Logger::writeToLog ("✅ Audio generation process started");
-        juce::Logger::writeToLog ("    Selection: " + inTime + " - " + outTime);
-        juce::Logger::writeToLog ("    Duration: " + juce::String (durationSeconds, 1) + "s");
-        juce::Logger::writeToLog ("    Plugin will poll for completion and auto-import");
+        // V2A no longer comes through here: it resolves the video segments under the
+        // selection instead (startVideoSegmentResolve). Only T2A reads the bare selection.
+        jassertfalse;
+        actionButton.setEnabled (true);
+        actionButton.setButtonText ("Generate Sound");
+        currentAsyncState = AsyncState::Idle;
     }
     else
     {
@@ -1933,7 +1527,7 @@ void PtV2AEditor::handleTimelineSelectionResult (const juce::String& output)
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         currentAsyncState = AsyncState::Idle;
     }
 }
@@ -1977,29 +1571,12 @@ void PtV2AEditor::startAudioGeneration (const juce::String& videoPath, const juc
         negativePrompt = "voices, music";  // Default if empty
     
     juce::String seedText = seedInput.getText().trim();
-    int seed = seedText.isEmpty() ? 42 : seedText.getIntValue();  // Default seed = 42
+    int seed = seedText.isEmpty() ? -1 : seedText.getIntValue();  // -1: random, drawn by the companion
     
     // bool useHighPrecision = highPrecisionModeToggle.getToggleState(); // (deprecated TODO remove in future)
     
-    // Read model selection from UI (1=MMAudio, 2=HunyuanVideo-Foley XL, 3=HunyuanVideo-Foley XXL)
-    int selectedId = modelProviderComboBox.getSelectedId();
-    PtV2AProcessor::ModelProvider modelProvider;
-    juce::String modelSize;
-    
-    if (selectedId == 1) {
-        modelProvider = PtV2AProcessor::ModelProvider::MMAudio;
-        modelSize = "Large";
-    } else if (selectedId == 2) {
-        modelProvider = PtV2AProcessor::ModelProvider::HunyuanVideoFoley;
-        modelSize = "XL";
-    } else {
-        modelProvider = PtV2AProcessor::ModelProvider::HunyuanVideoFoley;
-        modelSize = "XXL";
-    }
-    
-    juce::String providerName = (modelProvider == PtV2AProcessor::ModelProvider::MMAudio) ? "MMAudio" : "HunyuanVideo-Foley";
-    juce::Logger::writeToLog ("Model selection: " + providerName + " / " + modelSize);
-    juce::Logger::writeToLog ("Advanced params: negative_prompt=\"" + negativePrompt + "\", seed=" + juce::String(seed) + ", full_precision=" + "false");
+    juce::Logger::writeToLog ("Backend: " + currentAdapter().name);
+    juce::Logger::writeToLog ("Advanced params: negative_prompt=\"" + negativePrompt + "\", seed=" + juce::String(seed));
     
     // Call processor to start generation (returns immediately with expected output path)
     juce::String errorMessage;
@@ -2008,8 +1585,6 @@ void PtV2AEditor::startAudioGeneration (const juce::String& videoPath, const juc
         promptText,
         negativePrompt,  // User-controlled negative prompt
         seed,            // User-controlled seed
-        modelProvider,   // NEW: Selected model provider (MMAudio / HunyuanVideo-Foley)
-        modelSize,       // NEW: Selected model size
         "",              // No manual offset (deprecated TODO remove in future),
         timelineInSeconds,
         timelineOutSeconds,
@@ -2023,6 +1598,11 @@ void PtV2AEditor::startAudioGeneration (const juce::String& videoPath, const juc
     if (expectedAudioOutputPath.isEmpty())
     {
         juce::Logger::writeToLog ("ERROR: Failed to start audio generation: " + errorMessage);
+        if (! pendingSegments.isEmpty())
+        {
+            segmentFailed ("could not start: " + errorMessage);
+            return;
+        }
         
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon,
@@ -2032,7 +1612,7 @@ void PtV2AEditor::startAudioGeneration (const juce::String& videoPath, const juc
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         currentAsyncState = AsyncState::Idle;
         return;
     }
@@ -2068,13 +1648,9 @@ void PtV2AEditor::startT2AAudioGeneration (const juce::String& promptText, float
         negativePrompt = "voices, music";  // Default if empty
     
     juce::String seedText = seedInput.getText().trim();
-    int seed = seedText.isEmpty() ? 42 : seedText.getIntValue();
+    int seed = seedText.isEmpty() ? -1 : seedText.getIntValue();  // -1: random, drawn by the companion
     
-    // T2A only supports MMAudio with Large model size
-    PtV2AProcessor::ModelProvider modelProvider = PtV2AProcessor::ModelProvider::MMAudio;
-    juce::String modelSize = "Large";
-    
-    juce::Logger::writeToLog ("Model: MMAudio / " + modelSize);
+    juce::Logger::writeToLog ("Backend: " + currentAdapter().name);
     juce::Logger::writeToLog ("Advanced params: negative_prompt=\"" + negativePrompt + "\", seed=" + juce::String(seed));
     
     // Call processor to start T2A generation (no video, just text + duration)
@@ -2084,10 +1660,9 @@ void PtV2AEditor::startT2AAudioGeneration (const juce::String& promptText, float
         duration,
         negativePrompt,
         seed,
-        modelSize,
         &errorMessage
     );
-    
+
     if (expectedAudioOutputPath.isEmpty())
     {
         juce::Logger::writeToLog ("ERROR: Failed to start T2A generation: " + errorMessage);
@@ -2100,7 +1675,7 @@ void PtV2AEditor::startT2AAudioGeneration (const juce::String& promptText, float
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         currentAsyncState = AsyncState::Idle;
         return;
     }
@@ -2118,224 +1693,7 @@ void PtV2AEditor::startT2AAudioGeneration (const juce::String& promptText, float
 }
 
 //==============================================================================
-// Clip Bounds Reading (Async Phase 1 of Auto-Trim Workflow)
-//==============================================================================
-
-void PtV2AEditor::startClipBoundsRead (const juce::String& videoPath)
-{
-    // Phase 1: Read clip boundaries asynchronously via PTSL
-    // This is SAFE because it doesn't block the main thread
-    // Once complete, handleClipBoundsResult() will store bounds and proceed to generation
-    
-    juce::Logger::writeToLog ("=== Starting Async Clip Bounds Read ===");
-    juce::Logger::writeToLog ("Video: " + videoPath);
-    
-    // Store video path for later use in Phase 2
-    currentVideoPath = videoPath;
-    
-    // Get Python executable and script
-    juce::String pythonExe = processor.getPythonExecutable();
-    juce::File scriptFile = processor.getAPIClientScript();
-    
-    if (!scriptFile.existsAsFile())
-    {
-        juce::Logger::writeToLog ("ERROR: API client script not found");
-        juce::Logger::writeToLog ("Clip bounds read aborted - script not found");
-        return;
-    }
-    
-    // Build command: python -X utf8 standalone_api_client.py --action get_clip_bounds
-    juce::StringArray commandArray;
-    commandArray.add (pythonExe);
-    commandArray.add ("-X");
-    commandArray.add ("utf8");
-    commandArray.add (scriptFile.getFullPathName());
-    commandArray.add ("--action");
-    commandArray.add ("get_clip_bounds");
-    
-    juce::String command = commandArray.joinIntoString (" ");
-    juce::Logger::writeToLog ("Command: " + command);
-    
-    // Start async process
-    ptslProcess = std::make_unique<juce::ChildProcess>();
-    if (!ptslProcess->start (commandArray))
-    {
-        juce::Logger::writeToLog ("ERROR: Failed to start clip bounds process");
-        juce::Logger::writeToLog ("Clip bounds read aborted");
-        ptslProcess.reset();
-        return;
-    }
-    
-    // State should already be set by caller (ReadingClipBounds or ReadingClipBoundsForSoundSearch)
-    // Reset timer for this operation
-    asyncOperationStartTime = juce::Time::getCurrentTime();
-    juce::Logger::writeToLog ("Reading clip boundaries... (async)");
-    
-    // Timer should already be running from timeline selection
-    // If not (called standalone), start it
-    if (!isTimerRunning())
-        startTimer (TIMER_INTERVAL_MS);
-    
-    juce::Logger::writeToLog ("Clip bounds read started (async)");
-}
-
-void PtV2AEditor::handleClipBoundsResult (const juce::String& output)
-{
-    // Phase 1 complete: Parse JSON output with clip boundaries
-    juce::Logger::writeToLog ("=== Handling Clip Bounds Result ===");
-    juce::Logger::writeToLog ("Output: " + output);
-    
-    // Extract JSON from output (last JSON line)
-    auto lines = juce::StringArray::fromLines (output);
-    juce::String jsonOutput;
-    for (const auto& line : lines)
-    {
-        if (line.trimStart().startsWith ("{"))
-        {
-            jsonOutput = line.trim();
-        }
-    }
-    
-    if (jsonOutput.isEmpty())
-    {
-        juce::Logger::writeToLog ("ERROR: No JSON in clip bounds output");
-        juce::Logger::writeToLog ("Failed to parse clip bounds - aborting");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    // Parse JSON: {"success": true, "start_seconds": 5.005, "end_seconds": 10.844, ...}
-    auto jsonResult = juce::JSON::parse (jsonOutput);
-    if (jsonResult.isVoid())
-    {
-        juce::Logger::writeToLog ("ERROR: Failed to parse clip bounds JSON");
-        juce::Logger::writeToLog ("Invalid clip bounds response - aborting");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    bool success = jsonResult.getProperty ("success", false);
-    if (!success)
-    {
-        juce::String error = jsonResult.getProperty ("error", "Unknown error");
-        juce::Logger::writeToLog ("ERROR: Clip bounds read failed: " + error);
-        juce::Logger::writeToLog ("Aborting clip bounds read");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    // Extract clip boundaries
-    clipStartSeconds = (float) jsonResult.getProperty ("start_seconds", -1.0);
-    clipEndSeconds = (float) jsonResult.getProperty ("end_seconds", -1.0);
-    
-    juce::Logger::writeToLog ("✅ Clip bounds read successfully");
-    juce::Logger::writeToLog ("  Start: " + juce::String (clipStartSeconds, 3) + "s");
-    juce::Logger::writeToLog ("  End: " + juce::String (clipEndSeconds, 3) + "s");
-    
-    if (clipStartSeconds < 0.0f || clipEndSeconds < 0.0f)
-    {
-        juce::Logger::writeToLog ("ERROR: Invalid clip bounds");
-        juce::Logger::writeToLog ("Clip boundaries are invalid - aborting");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    // Phase 1 complete! Now proceed to Phase 2: Background generation with clip bounds
-    currentAsyncState = AsyncState::Idle;  // Reset before starting generation
-    juce::Logger::writeToLog ("Proceeding to audio generation with clip bounds");
-    
-    // Start audio generation (will use clipStartSeconds and clipEndSeconds)
-    startAudioGeneration (currentVideoPath, currentPrompt); 
-    actionButton.setButtonText ("Generating Audio...");
-}
-
-//==============================================================================
-// Handle Clip Bounds Result (Sound Search Variant)
-//==============================================================================
-
-void PtV2AEditor::handleClipBoundsForSoundSearchResult (const juce::String& output)
-{
-    // Parse JSON output with clip boundaries for Sound Search workflow
-    juce::Logger::writeToLog ("=== Handling Clip Bounds Result (Sound Search) ===");
-    juce::Logger::writeToLog ("Output: " + output);
-    
-    // Extract JSON from output (last JSON line)
-    auto lines = juce::StringArray::fromLines (output);
-    juce::String jsonOutput;
-    for (const auto& line : lines)
-    {
-        if (line.trimStart().startsWith ("{"))
-        {
-            jsonOutput = line.trim();
-        }
-    }
-    
-    if (jsonOutput.isEmpty())
-    {
-        juce::Logger::writeToLog ("ERROR: No JSON in clip bounds output");
-        actionButton.setEnabled (true);
-        actionButton.setButtonText ("Recommend Sounds");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    // Parse JSON
-    auto jsonResult = juce::JSON::parse (jsonOutput);
-    if (jsonResult.isVoid())
-    {
-        juce::Logger::writeToLog ("ERROR: Failed to parse clip bounds JSON");
-        actionButton.setEnabled (true);
-        actionButton.setButtonText ("Recommend Sounds");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    bool success = jsonResult.getProperty ("success", false);
-    if (!success)
-    {
-        juce::String error = jsonResult.getProperty ("error", "Unknown error");
-        juce::Logger::writeToLog ("ERROR: Clip bounds read failed: " + error);
-        actionButton.setEnabled (true);
-        actionButton.setButtonText ("Recommend Sounds");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    // Extract clip boundaries
-    float clipStart = (float) jsonResult.getProperty ("start_seconds", -1.0);
-    float clipEnd = (float) jsonResult.getProperty ("end_seconds", -1.0);
-    
-    juce::Logger::writeToLog ("✅ Clip bounds read successfully for sound search");
-    juce::Logger::writeToLog ("  Start: " + juce::String (clipStart, 3) + "s");
-    juce::Logger::writeToLog ("  End: " + juce::String (clipEnd, 3) + "s");
-    
-    if (clipStart < 0.0f || clipEnd < 0.0f)
-    {
-        juce::Logger::writeToLog ("ERROR: Invalid clip bounds");
-        actionButton.setEnabled (true);
-        actionButton.setButtonText ("Recommend Sounds");
-        currentAsyncState = AsyncState::Idle;
-        return;
-    }
-    
-    // Trigger sound search with clip bounds
-    currentAsyncState = AsyncState::Idle;  // Reset before starting search
-    juce::Logger::writeToLog ("Proceeding to sound search with clip bounds");
-    
-    triggerSoundSearch (
-        currentVideoPath,
-        currentPrompt,
-        "",              // Video offset
-        0.0f,            // Timeline start (not used)
-        0.0f,            // Timeline end (not used)
-        clipStart,       // Clip start from PTSL
-        clipEnd,         // Clip end from PTSL
-        true             // Auto-detect enabled
-    );
-}
-
-//==============================================================================
-// Source Video Duration Check
+// Source video duration via FFprobe (currently unused: PTSL clip bounds replaced it)
 //==============================================================================
 
 float PtV2AEditor::getSourceVideoDuration (const juce::String& videoPath)
@@ -2438,16 +1796,21 @@ void PtV2AEditor::checkAudioGenerationComplete()
     auto elapsed = juce::Time::getCurrentTime() - asyncOperationStartTime;
     if (elapsed.inMilliseconds() > GENERATION_TIMEOUT_MS)
     {
-        juce::Logger::writeToLog ("ERROR: Audio generation timed out after " + 
+        juce::Logger::writeToLog ("ERROR: Audio generation timed out after " +
                                   juce::String (GENERATION_TIMEOUT_MS / 1000) + "s");
-        
+        if (! pendingSegments.isEmpty())
+        {
+            segmentFailed ("generation timed out");
+            return;
+        }
+
         stopTimer();
         currentAsyncState = AsyncState::Idle;
         
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon,
             "Generation Timeout",
-            "Audio generation timed out after 2 minutes.\n\n"
+            "Audio generation timed out after 5 minutes.\n\n"
             "This might indicate:\n"
             "- API server is not responding\n"
             "- Network connection issues\n"
@@ -2457,7 +1820,7 @@ void PtV2AEditor::checkAudioGenerationComplete()
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         return;
     }
     
@@ -2488,6 +1851,7 @@ void PtV2AEditor::checkAudioGenerationComplete()
         
         stopTimer();
         actionButton.setButtonText ("Importing Audio...");
+        updateSegmentProgress ("importing");
         
         // Sound search now triggered manually via "Recommend Sounds" button
         
@@ -2522,10 +1886,46 @@ void PtV2AEditor::checkAudioGenerationComplete()
         
         stopTimer();
         actionButton.setButtonText ("Importing Audio...");
+        updateSegmentProgress ("importing");
         
         // Sound search now triggered manually via "Recommend Sounds" button
         
         startAudioImport (newestWavFile.getFullPathName());
+    }
+    else if (auto* proc = processor.getGenerationProcess(); proc != nullptr && ! proc->isRunning())
+    {
+        // The script has exited without producing a file: the backend refused or
+        // dropped the request. Report its last lines now rather than after the timeout.
+        auto scriptOutput = proc->readAllProcessOutput();
+        juce::StringArray lines;
+        lines.addLines (scriptOutput);
+        lines.removeEmptyStrings();
+        juce::String reason;
+        for (int i = lines.size(); --i >= 0 && reason.isEmpty();)
+            if (lines[i].containsIgnoreCase ("failed") || lines[i].containsIgnoreCase ("error"))
+                reason = lines[i].trim();
+        if (reason.isEmpty())
+            reason = "exit code " + juce::String (proc->getExitCode());
+
+        juce::Logger::writeToLog ("ERROR: generation script exited without an output file: " + reason);
+        juce::Logger::writeToLog (scriptOutput);
+
+        if (! pendingSegments.isEmpty())
+        {
+            segmentFailed ("backend: " + reason.substring (0, 120));
+            return;
+        }
+
+        stopTimer();
+        currentAsyncState = AsyncState::Idle;
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::MessageBoxIconType::WarningIcon, "Generation Failed",
+            "The backend did not return audio.\n\n" + reason.substring (0, 300)
+            + "\n\nIf the backend crashed while loading its model, give it more memory or "
+              "stop other GPU programs and try again. Details are in the log.",
+            "OK");
+        actionButton.setEnabled (true);
+        actionButton.setButtonText ("Generate Sound");
     }
     else
     {
@@ -2533,7 +1933,7 @@ void PtV2AEditor::checkAudioGenerationComplete()
         int64_t elapsedMs = elapsed.inMilliseconds();
         if (elapsedMs > 0 && (elapsedMs / 1000) % 10 == 0 && (elapsedMs % 1000) < TIMER_INTERVAL_MS)
         {
-            juce::Logger::writeToLog ("Still generating... (" + 
+            juce::Logger::writeToLog ("Still generating... (" +
                                       juce::String (elapsedMs / 1000) + "s elapsed)");
         }
     }
@@ -2561,7 +1961,7 @@ void PtV2AEditor::startAudioImport (const juce::String& audioPath)
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         currentAsyncState = AsyncState::Idle;
         return;
     }
@@ -2594,6 +1994,10 @@ void PtV2AEditor::startAudioImport (const juce::String& audioPath)
     {
         juce::Logger::writeToLog ("Warning: No timeline position available, importing at session start");
     }
+
+    // Onto the track this plugin sits on (new track only if that range is taken),
+    // named after the video clip it belongs to.
+    addImportTargetArgs (commandArray, currentImportClipLabel());
     
     juce::Logger::writeToLog ("Starting PTSL import process...");
     juce::Logger::writeToLog ("Command: " + commandArray.joinIntoString (" "));
@@ -2604,6 +2008,12 @@ void PtV2AEditor::startAudioImport (const juce::String& audioPath)
     if (!ptslProcess->start (commandArray))
     {
         juce::Logger::writeToLog ("ERROR: Failed to start PTSL import process");
+        if (! pendingSegments.isEmpty())
+        {
+            ptslProcess.reset();
+            segmentFailed ("import could not start");
+            return;
+        }
         
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon,
@@ -2615,7 +2025,7 @@ void PtV2AEditor::startAudioImport (const juce::String& audioPath)
         );
         
         actionButton.setEnabled (true);
-        actionButton.setButtonText ("Render Audio");
+        actionButton.setButtonText ("Generate Sound");
         ptslProcess.reset();
         currentAsyncState = AsyncState::Idle;
         return;
@@ -2641,20 +2051,24 @@ void PtV2AEditor::handleAudioImportResult (const juce::String& output)
     
     // Parse output (look for success indicator)
     bool success = output.contains ("success") && output.contains ("true");
-    
+
+    if (! pendingSegments.isEmpty())
+    {
+        // One clip of a multi-clip run: count it and move on; the summary comes at the end.
+        if (success)
+            ++segmentsGenerated;
+        else
+            skippedSegments.add (pendingSegments[currentSegmentIndex].getProperty ("clip_name", "").toString()
+                                 + " (import failed)");
+        startNextSegmentGeneration();
+        return;
+    }
+
     if (success)
     {
         juce::Logger::writeToLog ("✓ Audio successfully imported to Pro Tools timeline!");
-        
-        juce::AlertWindow::showMessageBoxAsync (
-            juce::MessageBoxIconType::InfoIcon,
-            "Success!",
-            "Audio generated and imported to Pro Tools timeline!\n\n"
-            "-> Generation complete\n"
-            "-> Imported to timeline\n\n"
-            "Check your Pro Tools session for the new audio track.",
-            "OK"
-        );
+        showStatus ("Audio generated and placed at " + (timelineInTime.isNotEmpty() ? timelineInTime : juce::String ("session start"))
+                    + (processor.getHostTrackName().isNotEmpty() ? " on track '" + processor.getHostTrackName() + "'" : juce::String()));
     }
     else
     {
@@ -2672,7 +2086,296 @@ void PtV2AEditor::handleAudioImportResult (const juce::String& output)
     }
     
     actionButton.setEnabled (true);
-    actionButton.setButtonText ("Render Audio");
+    actionButton.setButtonText ("Generate Sound");
+}
+
+//==============================================================================
+// Video segments: the selection (made on any track) mapped onto the video track
+//==============================================================================
+
+void PtV2AEditor::startVideoSegmentResolve (ResolveTarget target)
+{
+    resolveTarget = target;
+    auto scriptFile = processor.getAPIClientScript();
+
+    if (! scriptFile.existsAsFile())
+    {
+        juce::Logger::writeToLog ("ERROR: API client script not found");
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::MessageBoxIconType::WarningIcon, "Script Error",
+            "API client script not found.\n\nPlease check plugin installation.", "OK");
+        resetActionUi();
+        return;
+    }
+
+    // python -X utf8 standalone_api_client.py --action resolve_video_segments
+    juce::StringArray args { processor.getPythonExecutable(), "-X", "utf8", scriptFile.getFullPathName(),
+                             "--action", "resolve_video_segments" };
+    juce::Logger::writeToLog ("Resolving video segments: " + args.joinIntoString (" "));
+
+    ptslProcess = std::make_unique<juce::ChildProcess>();
+    if (! ptslProcess->start (args))
+    {
+        juce::Logger::writeToLog ("ERROR: Failed to start resolve_video_segments");
+        ptslProcess.reset();
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::MessageBoxIconType::WarningIcon, "Process Error",
+            "Failed to start the Python process that reads the selection.\n\nPlease check plugin installation.", "OK");
+        resetActionUi();
+        return;
+    }
+
+    actionButton.setEnabled (false);
+    actionButton.setButtonText ("Reading selection...");
+    progressValue = -1.0;   // no measurable progress yet: busy animation
+    progressLabel.setText ("Looking up the video clips under the selection...", juce::dontSendNotification);
+    progressBar.setVisible (true);
+    progressLabel.setVisible (true);
+    currentAsyncState = AsyncState::ResolvingVideoSegments;
+    asyncOperationStartTime = juce::Time::getCurrentTime();
+    startTimer (TIMER_INTERVAL_MS);
+}
+
+void PtV2AEditor::handleVideoSegmentsResult (const juce::String& output)
+{
+    juce::String jsonLine;
+    for (const auto& line : juce::StringArray::fromLines (output))
+        if (line.trimStart().startsWith ("{"))
+            jsonLine = line.trim();
+
+    auto json = juce::JSON::parse (jsonLine);
+    bool success = (bool) json.getProperty ("success", false);
+    juce::String error = json.getProperty ("error", "").toString();
+    auto segments = json.getProperty ("segments", juce::var());
+
+    if (resolveTarget == ResolveTarget::SoundSearch)
+    {
+        progressBar.setVisible (false);
+        progressLabel.setVisible (false);
+
+        if (! success)
+        {
+            // No video under the selection (or no selection): search by text alone,
+            // as the search always did when no video was available.
+            juce::Logger::writeToLog ("Sound search without video: " + error);
+            triggerSoundSearch ("", currentPrompt, "", 0.0f, 0.0f, -1.0f, -1.0f, false);
+            return;
+        }
+
+        if (segments.size() != 1)
+        {
+            juce::AlertWindow::showMessageBoxAsync (
+                juce::MessageBoxIconType::WarningIcon, "Several Video Clips Selected",
+                "The selection covers " + juce::String (segments.size()) + " video clips.\n\n"
+                "Sound recommendation works on one clip at a time: narrow the selection "
+                "so that it lies within a single clip.", "OK");
+            resetActionUi();
+            return;
+        }
+
+        auto seg = segments[0];
+        float duration = (float) (double) seg.getProperty ("duration_seconds", 0.0);
+        if (duration < 4.0f || duration > 12.0f)
+        {
+            juce::AlertWindow::showMessageBoxAsync (
+                juce::MessageBoxIconType::WarningIcon, "Selection Length",
+                juce::String::formatted ("The selected video range is %.1f seconds long.\n\n"
+                                         "Sound search needs a range of 4 to 12 seconds.", duration), "OK");
+            resetActionUi();
+            return;
+        }
+
+        currentVideoPath = seg.getProperty ("video_path", "").toString();
+        timelineInTime = seg.getProperty ("in_time", "").toString();
+        triggerSoundSearch (currentVideoPath, currentPrompt, "", 0.0f, 0.0f,
+                            (float) (double) seg.getProperty ("source_start_seconds", -1.0),
+                            (float) (double) seg.getProperty ("source_end_seconds", -1.0), true);
+        if (! isTimerRunning())
+            startTimer (TIMER_INTERVAL_MS);
+        return;
+    }
+
+    // Generation: one run per clip under the selection
+    if (! success)
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::MessageBoxIconType::WarningIcon, "No Video Under the Selection",
+            error + "\n\nMark a time range on any track; the video clips beneath it are used.", "OK");
+        resetActionUi();
+        return;
+    }
+
+    timelineFps = (float) (double) json.getProperty ("fps", 30.0);
+    pendingSegments.clear();
+    if (auto* array = segments.getArray())
+        for (const auto& seg : *array)
+        {
+            // A selection edge that catches one frame of the neighbouring clip is not a
+            // clip the user meant; leave it out of the queue and the summary.
+            double duration = (double) seg.getProperty ("duration_seconds", 0.0);
+            if (duration < 1.0)
+                juce::Logger::writeToLog ("Ignoring " + seg.getProperty ("clip_name", "").toString()
+                                          + ": only " + juce::String (duration, 3) + " s under the selection");
+            else
+                pendingSegments.add (seg);
+        }
+    currentSegmentIndex = -1;
+    segmentsGenerated = 0;
+    skippedSegments.clear();
+    juce::Logger::writeToLog (juce::String (pendingSegments.size()) + " video segment(s) under the selection");
+    startNextSegmentGeneration();
+}
+
+void PtV2AEditor::startNextSegmentGeneration()
+{
+    while (++currentSegmentIndex < pendingSegments.size())
+    {
+        auto seg = pendingSegments[currentSegmentIndex];
+        juce::String name = seg.getProperty ("clip_name", "").toString();
+        float duration = (float) (double) seg.getProperty ("duration_seconds", 0.0);
+
+        if (const auto limits = currentAdapter(); limits.isValid() && ! limits.acceptsDuration (duration))
+        {
+            skippedSegments.add (name + " (" + juce::String (duration, 1) + " s, " + limits.name + " takes " + limits.durationRange() + ")");
+            juce::Logger::writeToLog ("Skipping " + name + ": " + juce::String (duration, 2) + "s");
+            continue;
+        }
+
+        currentVideoPath   = seg.getProperty ("video_path", "").toString();
+        timelineInTime     = seg.getProperty ("in_time", "").toString();
+        timelineInSeconds  = (float) (double) seg.getProperty ("in_seconds", 0.0);
+        timelineOutSeconds = (float) (double) seg.getProperty ("out_seconds", 0.0);
+        clipStartSeconds   = (float) (double) seg.getProperty ("source_start_seconds", -1.0);
+        clipEndSeconds     = (float) (double) seg.getProperty ("source_end_seconds", -1.0);
+
+        juce::Logger::writeToLog ("Segment " + juce::String (currentSegmentIndex + 1) + "/" + juce::String (pendingSegments.size())
+                                  + ": " + name + " at " + timelineInTime + ", source "
+                                  + juce::String (clipStartSeconds, 3) + "s-" + juce::String (clipEndSeconds, 3) + "s");
+        updateSegmentProgress ("generating");
+        actionButton.setButtonText ("Generating Audio...");
+        startAudioGeneration (currentVideoPath, currentPrompt);
+        return;
+    }
+
+    finishSegmentGeneration (true);
+}
+
+void PtV2AEditor::segmentFailed (const juce::String& reason)
+{
+    auto seg = pendingSegments[juce::jlimit (0, pendingSegments.size() - 1, currentSegmentIndex)];
+    skippedSegments.add (seg.getProperty ("clip_name", "").toString() + " (" + reason + ")");
+    juce::Logger::writeToLog ("Segment failed: " + reason);
+    startNextSegmentGeneration();
+}
+
+void PtV2AEditor::updateSegmentProgress (const juce::String& stage)
+{
+    int total = pendingSegments.size();
+    if (total == 0)
+        return;
+
+    auto seg = pendingSegments[juce::jlimit (0, total - 1, currentSegmentIndex)];
+    progressValue = total > 1 ? (double) currentSegmentIndex / total : -1.0;   // -1: busy animation, no percentage from the backend
+    progressLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    progressLabel.setText ("Clip " + juce::String (currentSegmentIndex + 1) + " of " + juce::String (total) + ": "
+                               + seg.getProperty ("clip_name", "").toString() + "  (" + stage + ")",
+                           juce::dontSendNotification);
+    progressBar.setVisible (true);
+    progressLabel.setVisible (true);
+}
+
+void PtV2AEditor::finishSegmentGeneration (bool report)
+{
+    stopTimer();
+    int total = pendingSegments.size();
+
+    juce::String status;
+    if (report && total > 0)
+    {
+        auto track = processor.getHostTrackName();
+        status = juce::String (segmentsGenerated) + " of " + juce::String (total) + (total == 1 ? " clip" : " clips")
+                 + " generated" + (track.isNotEmpty() ? " on track '" + track + "'" : juce::String());
+        if (! skippedSegments.isEmpty())
+            status += ". Skipped: " + skippedSegments.joinIntoString ("; ");
+
+        if (segmentsGenerated == 0)
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Nothing Generated",
+                                                    "No clip received audio.\n\n- " + skippedSegments.joinIntoString ("\n- "), "OK");
+    }
+
+    pendingSegments.clear();
+    currentSegmentIndex = -1;
+    resetActionUi();
+    if (status.isNotEmpty())
+        showStatus (status, ! skippedSegments.isEmpty());
+}
+
+void PtV2AEditor::showStatus (const juce::String& text, bool warning)
+{
+    progressBar.setVisible (false);
+    progressLabel.setColour (juce::Label::textColourId,
+                             warning ? juce::Colour (0xfff0a030) : juce::Colour (0xffa8d8a8));
+    progressLabel.setText (text, juce::dontSendNotification);
+    progressLabel.setVisible (true);
+    juce::Logger::writeToLog ("Status: " + text);
+}
+
+juce::String PtV2AEditor::idleActionButtonText() const
+{
+    return currentWorkflowMode == WorkflowMode::AudioGeneration    ? "Generate Sound"
+         : currentWorkflowMode == WorkflowMode::SoundRecommendation ? "Recommend Sounds"
+         : currentWorkflowMode == WorkflowMode::Hybrid              ? "Generate Sound Events"
+                                                                    : "Spot Selection";
+}
+
+juce::String PtV2AEditor::modeInfoTitle() const
+{
+    return currentWorkflowMode == WorkflowMode::AudioGeneration    ? "Sound Generation"
+         : currentWorkflowMode == WorkflowMode::SoundRecommendation ? "Sound Recommendation"
+         : currentWorkflowMode == WorkflowMode::Hybrid              ? "Hybrid"
+                                                                    : "Spotting";
+}
+
+juce::String PtV2AEditor::modeDescription (WorkflowMode mode) const
+{
+    switch (mode)
+    {
+        case WorkflowMode::AudioGeneration:
+            return "Mark a time range on any track. Sound is generated for each video clip beneath it, "
+                   "from the picture and the optional prompt, and placed on this plugin's track at the clip's "
+                   "position (or on a new track when it does not fit there). "
+                   "T2A generates from the prompt alone, without video.";
+        case WorkflowMode::SoundRecommendation:
+            return "Mark a time range on any track, or type a prompt, and the sound archive is searched for "
+                   "matching recordings. Preview them in the list and import one onto this plugin's track "
+                   "at the selection.";
+        case WorkflowMode::Hybrid:
+            return "Mark a time range on any track. Instead of one mix, the backend returns one generated sound "
+                   "per sound event in the range, and each is placed on its own new track, named after the event, "
+                   "at the event's position. With 'Use existing memory locations' on, the memory locations inside "
+                   "the range (a spotting run, or markers you set) define the events; a clip without any is spotted "
+                   "by the backend first, or skipped when the second switch is off. With the first switch off, the "
+                   "backend finds all events itself.";
+        case WorkflowMode::AutoSpotting:
+        default:
+            return "Mark a time range on any track. The video clips beneath it are analysed one by one and a "
+                   "memory location is placed for every sound event found, plus one at each clip boundary.";
+    }
+}
+
+void PtV2AEditor::updateModeInfo()
+{
+    modeInfoButton.setTooltip (modeDescription (currentWorkflowMode));
+}
+
+void PtV2AEditor::resetActionUi()
+{
+    actionButton.setEnabled (true);
+    actionButton.setButtonText (idleActionButtonText());
+    spotWholeTrackButton.setEnabled (true);
+    progressBar.setVisible (false);
+    progressLabel.setVisible (false);
+    currentAsyncState = AsyncState::Idle;
 }
 
 //==============================================================================
@@ -2689,26 +2392,20 @@ void PtV2AEditor::handleGenerationModeChange()
     durationComboBox.setEnabled (isT2AMode);
     durationLabel.setEnabled (isT2AMode);
     
-    // Model provider handling: HunyuanVideo-Foley not compatible with T2A
+    // T2A needs a backend whose profile lists "text_only"; switch to the first such one.
     if (isT2AMode)
     {
-        // If HunyuanVideo-Foley is selected, switch to MMAudio
-        if (modelProviderComboBox.getSelectedId() >= 2)  // HunyuanVideo-Foley (XL or XXL)
-        {
-            juce::Logger::writeToLog ("T2A mode: Switching from HunyuanVideo-Foley to MMAudio");
-            modelProviderComboBox.setSelectedId (1, juce::sendNotification);  // Switch to MMAudio
-        }
-        
-        // T2A mode: Lock model provider to MMAudio only (disable dropdown)
-        modelProviderComboBox.setEnabled (false);
-        juce::Logger::writeToLog ("T2A mode: Model provider locked to MMAudio");
+        auto adapter = currentAdapter();
+        if (adapter.isValid() && ! adapter.supportsFeature ("text_only"))
+            for (size_t i = 0; i < adapterChoices.size(); ++i)
+                if (adapterChoices[i].supportsFeature ("text_only"))
+                {
+                    juce::Logger::writeToLog ("T2A mode: switching backend to " + adapterChoices[i].name);
+                    modelProviderComboBox.setSelectedId ((int) i + 1, juce::sendNotification);
+                    break;
+                }
     }
-    else
-    {
-        // V2A mode: Enable model provider dropdown for user selection
-        modelProviderComboBox.setEnabled (true);
-        juce::Logger::writeToLog ("V2A mode: Model provider dropdown enabled");
-    }
+    applyAdapterCapabilities();
     
     repaint();
 }
@@ -2716,44 +2413,35 @@ void PtV2AEditor::handleGenerationModeChange()
 //==============================================================================
 // API Credential Status Update
 //==============================================================================
-void PtV2AEditor::updateAPICredentialStatus()
+bool PtV2AEditor::tunnelTokenPresent (const juce::String& action)
 {
-    // Check if credentials are saved
-    bool hasCredentials = !processor.getCloudflareClientSecret().isEmpty();
-    
-    if (!hasCredentials)
-    {
-        // No credentials saved at all
-        apiWarningLabel.setText (juce::CharPointer_UTF8 ("\xe2\x9a\xa0 API credentials empty"), juce::dontSendNotification);  // ⚠
-        apiWarningLabel.setVisible (true);
-        juce::Logger::writeToLog ("=== API Credential Status: Missing ===");
-    }
-    else
-    {
-        // Credentials exist - test if they're valid (non-blocking check)
-        // This makes a real HTTP request, so we do it asynchronously
-        juce::String error;
-        bool valid = processor.testCloudflareCredentials (
-            processor.getCloudflareClientId(),
-            processor.getCloudflareClientSecret(),
-            &error
-        );
-        
-        if (valid)
-        {
-            // Valid credentials - hide warning
-            apiWarningLabel.setVisible (false);
-            juce::Logger::writeToLog ("=== API Credential Status: Valid ===");
-        }
-        else
-        {
-            // Invalid credentials - show warning
-            apiWarningLabel.setText (juce::CharPointer_UTF8 ("\xe2\x9a\xa0 No API Connection"), juce::dontSendNotification);  // ⚠
-            apiWarningLabel.setVisible (true);
-            juce::Logger::writeToLog ("=== API Credential Status: Invalid ===");
-            juce::Logger::writeToLog ("Error: " + error);
-        }
-    }
+    auto settings = processor.getBackendSettings();
+    if (! settings.useTunnel || settings.clientSecret.isNotEmpty())
+        return true;
+
+    juce::AlertWindow::showMessageBoxAsync (
+        juce::MessageBoxIconType::WarningIcon,
+        "Tunnel Token Missing",
+        "The backends are reached through a tunnel, but no access token is saved.\n\n"
+        "Enter it under Settings before " + action + ", or switch the tunnel off there.",
+        "OK"
+    );
+    return false;
+}
+
+void PtV2AEditor::updateBackendStatus()
+{
+    // Local backends need no token. Only a tunnel without a saved token is a
+    // configuration the user has to act on before anything can work.
+    auto settings = processor.getBackendSettings();
+    const bool tokenMissing = settings.useTunnel && settings.clientSecret.isEmpty();
+
+    apiWarningLabel.setText (juce::CharPointer_UTF8 ("\xe2\x9a\xa0 Tunnel enabled, token missing"),
+                             juce::dontSendNotification);
+    apiWarningLabel.setVisible (tokenMissing);
+
+    // Open Log only makes sense while a log file is being written
+    openLogButton.setEnabled (PtV2AProcessor::getLogFile() != juce::File());
 }
 
 //==============================================================================
@@ -2768,45 +2456,43 @@ void PtV2AEditor::handleWorkflowModeChange()
         currentWorkflowMode = WorkflowMode::SoundRecommendation;
     else if (autoSpottingModeButton.getToggleState())
         currentWorkflowMode = WorkflowMode::AutoSpotting;
-    
+    else if (hybridModeButton.getToggleState())
+        currentWorkflowMode = WorkflowMode::Hybrid;
+
     bool isAudioGen = (currentWorkflowMode == WorkflowMode::AudioGeneration);
     bool isSoundRec = (currentWorkflowMode == WorkflowMode::SoundRecommendation);
     bool isAutoSpotting = (currentWorkflowMode == WorkflowMode::AutoSpotting);
-    
+    bool isHybrid = (currentWorkflowMode == WorkflowMode::Hybrid);
+
     juce::Logger::writeToLog ("=== Workflow Mode Changed ===");
-    juce::String modeName = isAudioGen ? "Audio Generation" : (isSoundRec ? "Sound Recommendation" : "Auto Spotting");
-    juce::Logger::writeToLog ("New mode: " + modeName);
+    juce::Logger::writeToLog ("New mode: " + modeInfoTitle());
     
-    // Update action button text and appearance
-    if (isAudioGen)
-    {
-        actionButton.setButtonText ("Render Audio");
-    }
-    else if (isSoundRec)
-    {
-        actionButton.setButtonText ("Recommend Sounds");
-    }
-    else if (isAutoSpotting)
-    {
-        actionButton.setButtonText ("Analyze & Spot Markers");
-    }
+    // Update action button text; a running operation keeps its "Spotting... (40s)" style
+    // text, and its reset picks the idle text of whatever mode is current by then.
+    if (actionButton.isEnabled())
+        actionButton.setButtonText (idleActionButtonText());
+    updateModeInfo();
     
     // Show/hide fields based on workflow mode
     // Prompt is visible in Audio Gen and Sound Rec, hidden in Auto Spotting
     prompt.setVisible (!isAutoSpotting);
     promptLabel.setVisible (!isAutoSpotting);
     
-    // Auto Spotting info label only visible in Auto Spotting mode
-    autoSpottingInfoLabel.setVisible (isAutoSpotting);
+    // Whole-track button only visible in Auto Spotting mode
+    spotWholeTrackButton.setVisible (isAutoSpotting);
     
-    // Audio Generation specific fields (hidden in Sound Recommendation and Auto Spotting)
-    negativePromptInput.setVisible (isAudioGen);
-    negativePromptLabel.setVisible (isAudioGen);
+    // Generation parameters: Sound Generation and Hybrid
+    negativePromptInput.setVisible (isAudioGen || isHybrid);
+    negativePromptLabel.setVisible (isAudioGen || isHybrid);
+
+    seedInput.setVisible (isAudioGen || isHybrid);
+    seedLabel.setVisible (isAudioGen || isHybrid);
+    useMemoryLocationsToggle.setVisible (isHybrid);
+    autoSpotToggle.setVisible (isHybrid);
+    useDatabaseSoundsToggle.setVisible (isHybrid);
+    replaceGeneratedToggle.setVisible (isHybrid);
     
-    seedInput.setVisible (isAudioGen);
-    seedLabel.setVisible (isAudioGen);
-    
-    // V2A/T2A toggle only visible in Audio Generation (not used in Sound Recommendation)
+    // V2A/T2A toggle only visible in Sound Generation (not used in Sound Recommendation)
     // Sound Search automatically tries video detection first, then falls back to text-only
     v2aModeButton.setVisible (isAudioGen);
     t2aModeButton.setVisible (isAudioGen);
@@ -2815,124 +2501,397 @@ void PtV2AEditor::handleWorkflowModeChange()
     durationComboBox.setVisible (isAudioGen);
     durationLabel.setVisible (isAudioGen);
     
-    modelProviderComboBox.setVisible (isAudioGen);
-    modelLabel.setVisible (isAudioGen);
-    
+    // The Backend list is shown in every mode with that mode's adapter profiles
+    modelProviderComboBox.setVisible (true);
+    modelLabel.setVisible (true);
+    refreshAdapterCombo();
+
+    // Database results and their show/hide toggle belong to Sound Recommendation only
+    const bool showResults = isSoundRec && soundRecommendations.hasResults();
+    toggleSoundResultsButton.setVisible (showResults);
+    soundRecommendations.setVisible (showResults);
+    if (showResults)
+        toggleSoundResultsButton.setButtonText ("Hide Database Sounds (" + juce::String (soundRecommendations.getResultCount()) + ")");
+
+    if (! isSoundRec)
+        processor.stopSoundPreview();
+    resized();
     repaint();
 }
 
 //==============================================================================
 // Cloudflare Access Credential Dialog
 //==============================================================================
-void PtV2AEditor::showCredentialDialog()
+//==============================================================================
+// Adapter profiles: the Backend list per mode
+//==============================================================================
+juce::String PtV2AEditor::currentAdapterKind() const
 {
-    // Create AlertWindow on heap for async modal state
-    auto* credentialWindow = new juce::AlertWindow (
-        "API Access Credentials",
-        "Enter your Access Token Secret.\n\n"
-        "Do not change the Client ID unless advised to.\n"
-        "You can test the API connection before saving.\n",
-        juce::MessageBoxIconType::NoIcon
-    );
-    
-    // Pre-fill with current values
-    auto currentId = processor.getCloudflareClientId();
-    auto currentSecret = processor.getCloudflareClientSecret();
-    
-    // Client ID: Read-only, pre-filled (user doesn't need to change this)
-    credentialWindow->addTextEditor ("clientId", currentId, "Client ID:");
-    if (auto* idEditor = credentialWindow->getTextEditor ("clientId"))
-    {
-        idEditor->setReadOnly (false);
-       // idEditor->setColour (juce::TextEditor::backgroundColourId, juce::Colours::lightgrey);
-    }
-    
-    // Client Secret: Editable, this is what user needs to input
-    credentialWindow->addTextEditor ("clientSecret", currentSecret, "Client Secret:");
-    
-    credentialWindow->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    credentialWindow->addButton ("Test Connection", 2);
-    credentialWindow->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    
-    // Use async modal state (non-blocking, Pro Tools safe!)
-    credentialWindow->enterModalState (true, juce::ModalCallbackFunction::create (
-        [this, credentialWindow] (int result)
-        {
-            if (result == 2)  // Test Connection
-            {
-                auto testId = credentialWindow->getTextEditorContents ("clientId");
-                auto testSecret = credentialWindow->getTextEditorContents ("clientSecret");
-                
-                actionButton.setButtonText ("Testing...");
-                actionButton.setEnabled (false);
-                
-                juce::String error;
-                bool valid = processor.testCloudflareCredentials (testId, testSecret, &error);
-                
-                actionButton.setButtonText ("Render Audio");
-                actionButton.setEnabled (true);
-                
-                if (valid)
-                {
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::InfoIcon,
-                        "Connection Successful",
-                        "Credentials are valid! Save them for API Access.",
-                        "OK"
-                    );
-                    
-                    // Show dialog again to let user save
-                    juce::Timer::callAfterDelay (100, [this] { showCredentialDialog(); });
-                }
-                else
-                {
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::WarningIcon,
-                        "Connection Failed",
-                        "Could not connect to API.\n\n" + error,
-                        "OK"
-                    );
-                    
-                    // Show dialog again
-                    juce::Timer::callAfterDelay (100, [this] { showCredentialDialog(); });
-                }
-            }
-            else if (result == 1)  // Save
-            {
-                auto newId = credentialWindow->getTextEditorContents ("clientId");
-                auto newSecret = credentialWindow->getTextEditorContents ("clientSecret");
-                
-                if (processor.saveCloudflareCredentials (newId, newSecret))
-                {
-                    // Update credential status after successful save
-                    updateAPICredentialStatus();
-                    
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::InfoIcon,
-                        "Credentials Saved",
-                        "API Access credentials saved successfully.",
-                        "OK"
-                    );
-                }
-                else
-                {
-                    juce::AlertWindow::showMessageBoxAsync (
-                        juce::MessageBoxIconType::WarningIcon,
-                        "Save Failed",
-                        "Could not save credentials.\n"
-                        "Check file permissions.",
-                        "OK"
-                    );
-                }
-            }
-            
-            // JUCE will delete the window automatically
-        }
-    ), true);
+    return currentWorkflowMode == WorkflowMode::AudioGeneration    ? "generation"
+         : currentWorkflowMode == WorkflowMode::SoundRecommendation ? "search"
+         : currentWorkflowMode == WorkflowMode::Hybrid              ? "hybrid"
+                                                                    : "spotting";
 }
+
+void PtV2AEditor::refreshAdapterCombo()
+{
+    const auto kind = currentAdapterKind();
+    adapterChoices.clear();
+    for (const auto& p : processor.getAdapterProfiles())
+        if (p.kind == kind)
+            adapterChoices.push_back (p);
+
+    auto selected = processor.getSelectedAdapter (kind);
+    modelProviderComboBox.clear (juce::dontSendNotification);
+    int selectedId = 0;
+    for (size_t i = 0; i < adapterChoices.size(); ++i)
+    {
+        modelProviderComboBox.addItem (adapterChoices[i].name, (int) i + 1);
+        if (adapterChoices[i].file == selected.file)
+            selectedId = (int) i + 1;
+    }
+    if (adapterChoices.empty())
+    {
+        modelProviderComboBox.addItem ("No adapter profile for this mode (see Settings)", 1);
+        selectedId = 1;
+    }
+    modelProviderComboBox.setSelectedId (selectedId, juce::dontSendNotification);
+    modelProviderComboBox.setEnabled (! adapterChoices.empty());
+    applyAdapterCapabilities();
+}
+
+AdapterProfile PtV2AEditor::currentAdapter() const
+{
+    const int index = modelProviderComboBox.getSelectedId() - 1;
+    if (index >= 0 && index < (int) adapterChoices.size())
+        return adapterChoices[(size_t) index];
+    return {};
+}
+
+void PtV2AEditor::handleAdapterChanged()
+{
+    auto adapter = currentAdapter();
+    if (adapter.isValid())
+        processor.setSelectedAdapter (currentAdapterKind(), adapter.file);
+    applyAdapterCapabilities();
+    updateBackendStatus();
+}
+
+void PtV2AEditor::applyAdapterCapabilities()
+{
+    if (currentWorkflowMode != WorkflowMode::AudioGeneration && currentWorkflowMode != WorkflowMode::Hybrid)
+        return;
+    auto adapter = currentAdapter();
+    const bool known = adapter.isValid();
+    const bool negative = ! known || adapter.supportsFeature ("negative_prompt");
+    const bool seed = ! known || adapter.supportsFeature ("seed");
+    const bool textOnly = ! known || adapter.supportsFeature ("text_only");
+    negativePromptInput.setEnabled (negative);
+    negativePromptLabel.setEnabled (negative);
+    seedInput.setEnabled (seed);
+    seedLabel.setEnabled (seed);
+    if (currentWorkflowMode == WorkflowMode::Hybrid)
+    {
+        const bool memory = ! known || adapter.supportsFeature ("memory_locations");
+        useMemoryLocationsToggle.setEnabled (memory);
+        if (! memory)
+            useMemoryLocationsToggle.setToggleState (false, juce::dontSendNotification);
+        autoSpotToggle.setEnabled (memory && useMemoryLocationsToggle.getToggleState());
+        // Database sounds: the profile must claim it, and the backend's health must confirm it
+        // (search service reachable, audio index present); asked in the background.
+        const bool claimed = ! known || adapter.supportsFeature ("database_match");
+        hybridMatchAvailable = claimed;
+        hybridMatchReason = claimed ? juce::String() : adapter.name + " does not offer database sounds";
+        applyHybridMatchAvailability();
+        if (known && claimed)
+            refreshHybridBackendHealth();
+        return;
+    }
+    t2aModeButton.setEnabled (textOnly);
+    t2aModeButton.setTooltip (textOnly ? juce::String() : adapter.name + " needs a video");
+
+    // T2A lengths: whole seconds between the profile's min and max (4-12 s when unknown),
+    // the profile's default preselected, a still-valid earlier choice kept.
+    const double lo = known ? adapter.minDuration : 4.0;
+    const double hi = known ? adapter.maxDuration : 12.0;
+    const double preset = known ? adapter.defaultDuration : 8.0;
+    const double previous = durationComboBox.getText().dropLastCharacters (1).getDoubleValue();
+    const int step = juce::jmax (1, (int) std::ceil ((hi - lo) / 40.0));    // never more than ~40 items
+    durationComboBox.clear (juce::dontSendNotification);
+    int id = 0, selected = 0, nearestDefault = 0;
+    double nearestGap = 1.0e9;
+    for (double s = std::ceil (lo); s <= hi + 1.0e-9; s += step)
+    {
+        durationComboBox.addItem (juce::String ((int) s) + "s", ++id);
+        if (previous > 0.0 && std::abs (s - previous) < 1.0e-6) selected = id;
+        if (std::abs (s - preset) < nearestGap) { nearestGap = std::abs (s - preset); nearestDefault = id; }
+    }
+    if (id == 0)      // range narrower than a second: offer the maximum
+    {
+        durationComboBox.addItem (juce::String (hi, 1) + "s", ++id);
+        nearestDefault = id;
+    }
+    durationComboBox.setSelectedId (selected > 0 ? selected : nearestDefault, juce::dontSendNotification);
+}
+
+void PtV2AEditor::refreshBackendAvailability()
+{
+    struct Probe { juce::String kind, name, url; };
+    std::vector<Probe> probes;
+    const bool tunnel = processor.getBackendSettings().useTunnel;
+    for (auto* kind : { "spotting", "generation", "search", "hybrid" })
+    {
+        auto adapter = processor.getSelectedAdapter (kind);
+        probes.push_back ({ kind, adapter.name,
+                            adapter.isValid() ? adapter.activeUrl (tunnel) + adapter.health : juce::String() });
+    }
+    const int request = ++availabilityRequest;
+    juce::Component::SafePointer<PtV2AEditor> safeThis (this);
+    juce::Thread::launch ([safeThis, probes, request, tunnel]
+    {
+        std::map<juce::String, BackendAvailability> results;
+        for (const auto& probe : probes)
+        {
+            BackendAvailability state;
+            if (probe.url.isEmpty())
+            {
+                state.available = false;
+                state.reason = "no " + probe.kind + " backend profile in the adapters folder (Settings)";
+            }
+            else if (tunnel)
+            {
+                state.available = true;          // the tunnel needs the token; the Python side checks that
+            }
+            else
+            {
+                int status = 0;
+                auto stream = juce::URL (probe.url).createInputStream (
+                    juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                        .withConnectionTimeoutMs (3000).withStatusCode (&status));
+                if (stream != nullptr)
+                    stream->readEntireStreamAsString();
+                state.available = stream != nullptr && status >= 200 && status < 300;
+                if (! state.available)
+                    state.reason = probe.name + " does not answer at " + probe.url
+                                   + (status > 0 ? " (" + juce::String (status) + ")" : juce::String());
+            }
+            results[probe.kind] = state;
+        }
+        juce::MessageManager::callAsync ([safeThis, request, results]
+        {
+            if (safeThis == nullptr || request != safeThis->availabilityRequest)
+                return;                                    // a newer probe superseded this one
+            safeThis->backendAvailability = results;
+            safeThis->applyBackendAvailability();
+            juce::Timer::callAfterDelay (30000, [safeThis, request]
+            {
+                if (safeThis != nullptr && request == safeThis->availabilityRequest)
+                    safeThis->refreshBackendAvailability();
+            });
+        });
+    });
+}
+
+void PtV2AEditor::applyBackendAvailability()
+{
+    const std::pair<juce::TextButton*, std::pair<juce::String, WorkflowMode>> modes[] = {
+        { &autoSpottingModeButton, { "spotting",   WorkflowMode::AutoSpotting } },
+        { &audioGenModeButton,     { "generation", WorkflowMode::AudioGeneration } },
+        { &soundRecModeButton,     { "search",     WorkflowMode::SoundRecommendation } },
+        { &hybridModeButton,       { "hybrid",     WorkflowMode::Hybrid } },
+    };
+    for (const auto& [button, info] : modes)
+    {
+        const auto state = backendAvailability.find (info.first);
+        const bool available = state == backendAvailability.end() || state->second.available;
+        button->setEnabled (available);
+        button->setTooltip (available ? modeDescription (info.second)
+                                      : "Not available: " + state->second.reason + "\n\n" + modeDescription (info.second));
+    }
+}
+
+void PtV2AEditor::applyHybridMatchAvailability()
+{
+    useDatabaseSoundsToggle.setEnabled (hybridMatchAvailable);
+    if (! hybridMatchAvailable)
+        useDatabaseSoundsToggle.setToggleState (false, juce::dontSendNotification);
+    useDatabaseSoundsToggle.setTooltip (hybridMatchAvailable
+        ? juce::String ("On: for every generated sound the backend also finds library recordings that sound like it, "
+                        "stitched from at most the pieces per 10 s set in Settings, and places them on a track "
+                        "underneath the generated one.")
+        : "Not available: " + hybridMatchReason);
+    replaceGeneratedToggle.setEnabled (hybridMatchAvailable && useDatabaseSoundsToggle.getToggleState());
+}
+
+void PtV2AEditor::refreshHybridBackendHealth()
+{
+    // GET <backend>/health in the background; "database_match": {"available", "reason"} decides
+    // whether the database switch is usable. A backend that says nothing keeps the profile's word.
+    auto adapter = currentAdapter();
+    if (! adapter.isValid())
+        return;
+    const int request = ++hybridHealthRequest;
+    juce::URL url (adapter.activeUrl (processor.getBackendSettings().useTunnel) + adapter.health);
+    juce::Component::SafePointer<PtV2AEditor> safeThis (this);
+    juce::Thread::launch ([safeThis, url, request]() mutable
+    {
+        int statusCode = 0;
+        juce::String body;
+        if (auto stream = url.createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                                                     .withConnectionTimeoutMs (4000).withStatusCode (&statusCode)))
+            body = stream->readEntireStreamAsString();
+        juce::MessageManager::callAsync ([safeThis, request, statusCode, body]
+        {
+            if (safeThis == nullptr || request != safeThis->hybridHealthRequest)
+                return;                                    // stale: a newer check is on its way
+            bool available = safeThis->hybridMatchAvailable;
+            juce::String reason = safeThis->hybridMatchReason;
+            if (statusCode <= 0 || statusCode >= 400)
+            {
+                available = false;
+                reason = "the backend does not answer (" + juce::String (statusCode) + ")";
+            }
+            else if (auto json = juce::JSON::parse (body); json.isObject() && json.hasProperty ("database_match"))
+            {
+                auto match = json.getProperty ("database_match", juce::var());
+                available = (bool) match.getProperty ("available", false);
+                reason = match.getProperty ("reason", "").toString();
+                if (! available && reason.isEmpty())
+                    reason = "the backend reports no library match";
+            }
+            safeThis->hybridMatchAvailable = available;
+            safeThis->hybridMatchReason = reason;
+            safeThis->applyHybridMatchAvailability();
+        });
+    });
+}
+
+void PtV2AEditor::showSettings()
+{
+    juce::Component::SafePointer<PtV2AEditor> safeThis (this);
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = juce::String (PtV2AProcessor::kPluginName) + " - Settings";
+    options.dialogBackgroundColour = getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId);
+    options.content.setOwned (new SettingsPanel (processor, [safeThis]
+    {
+        if (safeThis != nullptr)
+        {
+            safeThis->updateBackendStatus();
+            safeThis->refreshAdapterCombo();     // profiles or addresses may have changed
+            safeThis->refreshBackendAvailability();
+        }
+    }));
+    options.componentToCentreAround = this;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    options.escapeKeyTriggersCloseButton = true;
+
+    // Async, like every other dialog here: a blocking modal loop would stall Pro Tools.
+    options.launchAsync();
+}
+
 //==============================================================================
 // Sound Search Event Handlers
 //==============================================================================
+
+void PtV2AEditor::startSoundPreview (const SoundResult& sound)
+{
+    // Diagnostics: does Pro Tools run this track's audio at all? The preview is mixed
+    // into processBlock(), so without calls there is nothing to hear.
+    {
+        auto callsAtStart = processor.getProcessBlockCount();
+        juce::Logger::writeToLog ("Preview: processBlock calls so far " + juce::String (callsAtStart)
+                                  + ", engine sample rate " + juce::String (processor.getCurrentSampleRateReported()));
+        juce::Component::SafePointer<PtV2AEditor> safeThis (this);
+        juce::Timer::callAfterDelay (2000, [safeThis, callsAtStart]
+        {
+            if (safeThis == nullptr)
+                return;
+            auto now = safeThis->processor.getProcessBlockCount();
+            juce::Logger::writeToLog ("Preview: processBlock calls after 2 s " + juce::String (now)
+                                      + ", transport playing = " + juce::String ((int) safeThis->processor.isSoundPreviewPlaying()));
+            if (now == callsAtStart)
+                safeThis->showStatus ("Pro Tools is not processing this track, so the preview cannot be heard "
+                                      "(check the track's output and that the engine is running).", true);
+        });
+    }
+
+    // Already on disk (downloaded for import)? Play that.
+    if (sound.localPath.isNotEmpty() && juce::File (sound.localPath).existsAsFile())
+    {
+        if (processor.startSoundPreview (sound.localPath))
+            soundRecommendations.setPreviewing (sound.id);
+        return;
+    }
+
+    // Preview cache in the temp folder, one file per sound id; the extension comes
+    // from the server's content type because the decoder is chosen by extension.
+    auto cacheDir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("ai_sound_design_previews");
+    cacheDir.createDirectory();
+    for (const auto& entry : juce::RangedDirectoryIterator (cacheDir, false, "preview_" + juce::String (sound.id) + ".*"))
+    {
+        if (entry.getFile().getSize() > 0 && processor.startSoundPreview (entry.getFile().getFullPathName()))
+        {
+            soundRecommendations.setPreviewing (sound.id);
+            return;
+        }
+    }
+    auto target = cacheDir.getChildFile ("preview_" + juce::String (sound.id) + ".mp3");
+
+    // Fetch <sound_search>/sounds/<id>/preview off the message thread, then play.
+    auto settings = processor.getBackendSettings();
+    juce::URL url (processor.getConfiguredAPIUrl ("sound_search").trimCharactersAtEnd ("/") + "/sounds/" + juce::String (sound.id) + "/preview");
+    juce::String headers;
+    if (settings.useTunnel && settings.clientSecret.isNotEmpty())
+        headers = "CF-Access-Client-Id: " + settings.clientId + "\r\nCF-Access-Client-Secret: " + settings.clientSecret + "\r\n";
+
+    soundRecommendations.setPreviewLoading (sound.id);
+    juce::Component::SafePointer<PtV2AEditor> safeThis (this);
+    const int id = sound.id;
+    juce::Logger::writeToLog ("Fetching preview: " + url.toString (false));
+
+    juce::Thread::launch ([safeThis, url, headers, target, id]() mutable
+    {
+        bool ok = false;
+        juce::StringPairArray responseHeaders;
+        int statusCode = 0;
+        auto options = juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                           .withConnectionTimeoutMs (8000)
+                           .withExtraHeaders (headers)
+                           .withResponseHeaders (&responseHeaders)
+                           .withStatusCode (&statusCode);
+        if (auto stream = url.createInputStream (options); stream != nullptr && statusCode < 400)
+        {
+            auto type = responseHeaders.getValue ("Content-Type", "").toLowerCase();
+            juce::String ext = type.contains ("wav")  ? ".wav"
+                             : type.contains ("flac") ? ".flac"
+                             : type.contains ("aiff") ? ".aiff"
+                             : type.contains ("ogg")  ? ".ogg"
+                                                      : ".mp3";
+            target = target.withFileExtension (ext);
+            juce::TemporaryFile temp (target);
+            if (auto out = temp.getFile().createOutputStream())
+            {
+                out->writeFromInputStream (*stream, -1);
+                out.reset();
+                ok = temp.getFile().getSize() > 0 && temp.overwriteTargetFileWithTemporary();
+            }
+        }
+        juce::MessageManager::callAsync ([safeThis, target, id, ok]
+        {
+            if (safeThis == nullptr)
+                return;
+            if (ok && safeThis->processor.startSoundPreview (target.getFullPathName()))
+                safeThis->soundRecommendations.setPreviewing (id);
+            else
+            {
+                safeThis->soundRecommendations.setPreviewing (-1);
+                safeThis->showStatus ("Preview not available; check that the sound search backend is reachable.", true);
+            }
+        });
+    });
+}
 
 void PtV2AEditor::handleSoundDownload (const SoundResult& sound)
 {
@@ -3016,6 +2975,13 @@ void PtV2AEditor::handleSoundDownload (const SoundResult& sound)
 
 void PtV2AEditor::handleSoundImport (const SoundResult& sound)
 {
+    if (sound.localPath.isEmpty() || ! juce::File (sound.localPath).existsAsFile())
+    {
+        // One click does both: fetch the file, then place it (see the download branch of timerCallback).
+        autoImportSoundId = sound.id;
+        handleSoundDownload (sound);
+        return;
+    }
     juce::Logger::writeToLog ("=== Sound Import Clicked ===");
     juce::Logger::writeToLog ("Sound ID: " + juce::String (sound.id));
     juce::Logger::writeToLog ("Description: " + sound.description);
@@ -3060,14 +3026,14 @@ void PtV2AEditor::handleSoundImport (const SoundResult& sound)
         return;
     }
     
-    // Build timeline reading command (get_video_info action)
+    // Build timeline reading command: only the in-point is needed, no video lookup
     juce::StringArray commandArray;
     commandArray.add (pythonExe);
     commandArray.add ("-X");
     commandArray.add ("utf8");
     commandArray.add (scriptFile.getFullPathName());
     commandArray.add ("--action");
-    commandArray.add ("get_video_info");
+    commandArray.add ("get_video_selection");
     
     juce::Logger::writeToLog ("Command: " + commandArray.joinIntoString (" "));
     
@@ -3103,6 +3069,39 @@ void PtV2AEditor::handleSoundImport (const SoundResult& sound)
     juce::Logger::writeToLog ("Timeline reading polling started...");
 }
 
+void PtV2AEditor::addImportTargetArgs (juce::StringArray& commandArray, const juce::String& clipLabel)
+{
+    auto track = processor.getHostTrackName();
+    if (track.isNotEmpty())
+    {
+        commandArray.add ("--track-name");
+        commandArray.add (track);
+    }
+    else
+    {
+        juce::Logger::writeToLog ("Host has not reported a track name; importing to a new track");
+    }
+    if (clipLabel.isNotEmpty())
+    {
+        commandArray.add ("--clip-name");
+        commandArray.add (clipLabel);
+    }
+}
+
+juce::String PtV2AEditor::currentImportClipLabel() const
+{
+    juce::String base;
+    if (currentSegmentIndex >= 0 && currentSegmentIndex < pendingSegments.size())
+        base = pendingSegments[currentSegmentIndex].getProperty ("clip_name", "").toString();
+    if (base.isEmpty() && currentVideoPath.isNotEmpty())
+        base = juce::File (currentVideoPath).getFileNameWithoutExtension();
+    if (base.isEmpty())
+        base = currentPrompt.trim().substring (0, 30);
+    if (base.isEmpty())
+        base = "generated";
+    return base + " AI";
+}
+
 void PtV2AEditor::startSoundImportProcess (const SoundResult& sound, const juce::String& timecode)
 {
     juce::Logger::writeToLog ("=== Starting Sound Import Process ===");
@@ -3130,11 +3129,17 @@ void PtV2AEditor::startSoundImportProcess (const SoundResult& sound, const juce:
         commandArray.add ("--timecode");
         commandArray.add (timecode);
         juce::Logger::writeToLog ("Import position: " + timecode);
+        if (currentTimecodeOut.isNotEmpty() && currentTimecodeOut != timecode)
+        {
+            commandArray.add ("--timecode-out");
+            commandArray.add (currentTimecodeOut);
+        }
     }
     else
     {
         juce::Logger::writeToLog ("No timeline position, importing at session start");
     }
+    addImportTargetArgs (commandArray, sound.description.substring (0, 40).trim());
     
     juce::Logger::writeToLog ("Command: " + commandArray.joinIntoString (" "));
     
@@ -3256,7 +3261,7 @@ void PtV2AEditor::triggerSoundSearch (
     args.add ("--action");
     args.add ("search");
     args.add ("--limit");
-    args.add ("10");  // TODO: how many?
+    args.add (juce::String (processor.getBackendSettings().searchResults));   // "Sounds per search" in the settings
     args.add ("--quiet");  // Suppress progress messages
     args.add ("--session-id");
     args.add (sessionId);
@@ -3436,6 +3441,7 @@ void PtV2AEditor::handleSoundSearchResult (const juce::String& output)
         sound.similarity = resultObj->getProperty ("similarity");
         sound.localPath = resultObj->getProperty ("local_path").toString();
         sound.filename = resultObj->getProperty ("filename").toString();
+        sound.durationSeconds = (float) (double) resultObj->getProperty ("duration_seconds");
         
         sounds.push_back (sound);
         
@@ -3457,18 +3463,10 @@ void PtV2AEditor::handleSoundSearchResult (const juce::String& output)
         
         // Auto-show results on first load
         soundRecommendations.setVisible (true);
+        resized();
         juce::Logger::writeToLog ("Sound recommendations panel auto-shown");
         
-        // Show success message
-        juce::AlertWindow::showMessageBoxAsync (
-            juce::MessageBoxIconType::InfoIcon,
-            "Sound Search Complete!",
-            "Found " + juce::String (sounds.size()) + " matching sounds from BBC Sound Archive.\n\n"
-            "-> Search complete\n"
-            "-> Results loaded\n\n"
-            "Check the Database Recommendations panel below to import sounds.",
-            "OK"
-        );
+        showStatus ("Found " + juce::String (sounds.size()) + " matching sounds; pick one below to import it.");
     }
 }
 
@@ -3480,6 +3478,9 @@ void PtV2AEditor::handleToggleSoundResults()
 {
     bool isCurrentlyVisible = soundRecommendations.isVisible();
     soundRecommendations.setVisible (!isCurrentlyVisible);
+    if (isCurrentlyVisible)
+        processor.stopSoundPreview();
+    resized();
     
     // Update button text based on new state
     if (!isCurrentlyVisible)
@@ -3508,19 +3509,9 @@ void PtV2AEditor::handleRecommendSoundsButtonClicked()
 {
     juce::Logger::writeToLog ("=== Recommend Sounds Button Clicked ===");
     
-    // Check if credentials are saved
-    if (processor.getCloudflareClientSecret().isEmpty())
-    {
-        juce::AlertWindow::showMessageBoxAsync (
-            juce::MessageBoxIconType::WarningIcon,
-            "Error: No API connection",
-            "Please save the correct API credentials under API Settings before searching sounds.\n\n"
-            "Click 'API Settings' at the bottom right to configure your credentials.",
-            "OK"
-        );
+    if (! tunnelTokenPresent ("searching sounds"))
         return;
-    }
-    
+
     // Get prompt text
     juce::String promptText = prompt.getText();
     
@@ -3533,15 +3524,13 @@ void PtV2AEditor::handleRecommendSoundsButtonClicked()
     
     // IMPORTANT: Sound Search always tries to get video from Pro Tools via PTSL first
     // Then falls back to text-only if no video is available
-    // This is DIFFERENT from Audio Generation which respects V2A/T2A toggle
+    // This is DIFFERENT from Sound Generation which respects V2A/T2A toggle
     
     juce::Logger::writeToLog ("Starting async PTSL workflow for sound search...");
     juce::Logger::writeToLog ("Will use video if available, otherwise text-only search");
-    
-    // Start PTSL timeline selection read (non-blocking)
-    currentAsyncState = AsyncState::ReadingTimelineForSoundSearch;
-    startTimer (TIMER_INTERVAL_MS);
-    startTimelineSelectionRead();
+
+    // Which video clip is under the selection? Text-only search if none.
+    startVideoSegmentResolve (ResolveTarget::SoundSearch);
 }
 
 //==============================================================================
@@ -3549,37 +3538,220 @@ void PtV2AEditor::handleRecommendSoundsButtonClicked()
 //==============================================================================
 void PtV2AEditor::handleAutoSpottingButtonClicked()
 {
-    juce::Logger::writeToLog ("=== Auto Spotting Button Clicked ===");
-    juce::Logger::writeToLog ("Starting Auto Spotting wizard (Wizard of Oz prototype)...");
-    
-    // Validate script exists before starting fake delays
-    auto scriptFile = processor.getAPIClientScript();
-    auto companionDir = scriptFile.getParentDirectory();
-    auto scriptPath = companionDir.getChildFile ("auto_spotting_wizard.py");
-    
-    if (!scriptPath.existsAsFile())
+    juce::Logger::writeToLog ("=== Spotting Button Clicked ===");
+
+    auto scriptPath = processor.getAPIClientScript().getParentDirectory().getChildFile ("spotting_client.py");
+    if (! scriptPath.existsAsFile())
     {
-        juce::Logger::writeToLog ("ERROR: auto_spotting_wizard.py not found at: " + scriptPath.getFullPathName());
-        
+        juce::Logger::writeToLog ("ERROR: spotting_client.py not found at: " + scriptPath.getFullPathName());
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon,
-            "Error: Auto Spotting Script Not Found",
-            "Could not find auto_spotting_wizard.py script.\n\n"
-            "Expected location: " + scriptPath.getFullPathName(),
+            "Spotting Script Not Found",
+            "Could not find spotting_client.py.\n\nExpected location: " + scriptPath.getFullPathName(),
             "OK"
         );
-        
         return;
     }
-    
-    // Start timer for fake progress (Python script will be started after 11s in timerCallback)
-    actionButton.setEnabled (false);
-    actionButton.setButtonText ("Analyzing video...");
-    
-    currentAsyncState = AsyncState::AutoSpottingAnalysis;
+
+    startSpotting (false);
+}
+
+void PtV2AEditor::handleHybridButtonClicked()
+{
+    juce::Logger::writeToLog ("=== Hybrid Button Clicked ===");
+    auto scriptPath = processor.getAPIClientScript().getParentDirectory().getChildFile ("hybrid_client.py");
+    if (! scriptPath.existsAsFile())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Script Not Found",
+                                                "Could not find hybrid_client.py.\n\nExpected location: "
+                                                + scriptPath.getFullPathName(), "OK");
+        return;
+    }
+    if (! currentAdapter().isValid())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "No Hybrid Backend",
+                                                "No adapter profile of kind \"hybrid\" is selected. "
+                                                "Open Settings to add or pick one.", "OK");
+        return;
+    }
+    startHybrid();
+}
+
+void PtV2AEditor::startHybrid()
+{
+    auto scriptPath = processor.getAPIClientScript().getParentDirectory().getChildFile ("hybrid_client.py");
+
+    spottingProgressFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                               .getChildFile ("ai_sound_design_hybrid_" + juce::String (juce::Time::currentTimeMillis()) + ".json");
+    spottingProgressFile.deleteFile();
+    spottingProgressMtime = juce::Time();
+
+    juce::StringArray args;
+    args.add (processor.getPythonExecutable());
+    args.add ("-X");
+    args.add ("utf8");
+    args.add (scriptPath.getFullPathName());
+    args.add ("--from-selection");
+    args.add ("--progress-file");
+    args.add (spottingProgressFile.getFullPathName());
+    args.add ("--adapter");
+    args.add (currentAdapter().file);
+    if (prompt.getText().trim().isNotEmpty())
+    {
+        args.add ("--prompt");
+        args.add (prompt.getText().trim());
+    }
+    if (negativePromptInput.getText().trim().isNotEmpty())
+    {
+        args.add ("--negative-prompt");
+        args.add (negativePromptInput.getText().trim());
+    }
+    args.add ("--seed");
+    args.add (juce::String (seedInput.getText().trim().isEmpty() ? -1 : seedInput.getText().trim().getIntValue()));
+    if (useMemoryLocationsToggle.getToggleState() && useMemoryLocationsToggle.isEnabled())
+    {
+        args.add ("--use-memory-locations");
+        if (! autoSpotToggle.getToggleState())
+            args.add ("--no-auto-spot");
+    }
+    if (useDatabaseSoundsToggle.getToggleState() && useDatabaseSoundsToggle.isEnabled())
+    {
+        args.add ("--use-database");
+        if (replaceGeneratedToggle.getToggleState())
+            args.add ("--replace-generated");
+    }
+
+    juce::Logger::writeToLog ("Hybrid command: " + args.joinIntoString (" "));
+
+    ptslProcess = std::make_unique<juce::ChildProcess>();
+    if (! ptslProcess->start (args))
+    {
+        juce::Logger::writeToLog ("ERROR: Failed to start hybrid_client.py");
+        ptslProcess.reset();
+        currentAsyncState = AsyncState::Idle;
+        resetSpottingUi();
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Failed to Start Script",
+                                                "Could not start hybrid_client.py. Please check the log file.", "OK");
+        return;
+    }
+
+    currentAsyncState = AsyncState::HybridGeneration;
     asyncOperationStartTime = juce::Time::getCurrentTime();
+    actionButton.setEnabled (false);
+    actionButton.setButtonText ("Generating...");
+    progressValue = -1.0;
+    progressLabel.setText ("Reading selection...", juce::dontSendNotification);
+    progressBar.setVisible (true);
+    progressLabel.setVisible (true);
     startTimer (TIMER_INTERVAL_MS);
-    
-    juce::Logger::writeToLog ("Auto Spotting timer started (11s fake delay before marker creation)");
+}
+
+void PtV2AEditor::startSpotting (bool wholeTrack)
+{
+    auto scriptPath = processor.getAPIClientScript().getParentDirectory().getChildFile ("spotting_client.py");
+
+    spottingProgressFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                               .getChildFile ("ai_sound_design_spotting_" + juce::String (juce::Time::currentTimeMillis()) + ".json");
+    spottingProgressFile.deleteFile();
+    spottingProgressMtime = juce::Time();
+
+    // python -X utf8 spotting_client.py --from-selection|--whole-track --progress-file <json>
+    juce::StringArray args;
+    args.add (processor.getPythonExecutable());
+    args.add ("-X");
+    args.add ("utf8");
+    args.add (scriptPath.getFullPathName());
+    args.add (wholeTrack ? "--whole-track" : "--from-selection");
+    args.add ("--progress-file");
+    args.add (spottingProgressFile.getFullPathName());
+
+    juce::Logger::writeToLog ("Spotting command: " + args.joinIntoString (" "));
+
+    ptslProcess = std::make_unique<juce::ChildProcess>();
+    if (! ptslProcess->start (args))
+    {
+        juce::Logger::writeToLog ("ERROR: Failed to start spotting_client.py");
+        ptslProcess.reset();
+        currentAsyncState = AsyncState::Idle;
+        resetSpottingUi();
+
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::MessageBoxIconType::WarningIcon,
+            "Failed to Start Script",
+            "Could not start spotting_client.py. Please check the log file.",
+            "OK"
+        );
+        return;
+    }
+
+    currentAsyncState = AsyncState::SpottingAnalysis;
+    asyncOperationStartTime = juce::Time::getCurrentTime();
+    actionButton.setEnabled (false);
+    spotWholeTrackButton.setEnabled (false);
+    actionButton.setButtonText ("Spotting...");
+    progressValue = -1.0;   // no measurable progress yet: busy animation
+    progressLabel.setText ("Reading selection...", juce::dontSendNotification);
+    progressBar.setVisible (true);
+    progressLabel.setVisible (true);
+    startTimer (TIMER_INTERVAL_MS);
+}
+
+void PtV2AEditor::updateSpottingProgress()
+{
+    if (! spottingProgressFile.existsAsFile())
+        return;
+
+    auto mtime = spottingProgressFile.getLastModificationTime();
+    if (mtime == spottingProgressMtime)
+        return;
+    spottingProgressMtime = mtime;
+
+    auto doc = juce::JSON::parse (spottingProgressFile.loadFileAsString());
+    if (! doc.isObject())
+        return;                                   // caught the file half-written; next tick
+
+    int current = (int) doc.getProperty ("current", 0);
+    int total = (int) doc.getProperty ("total", 0);
+    juce::String clip = doc.getProperty ("clip", "").toString();
+    juce::String stage = doc.getProperty ("stage", "").toString();
+    juce::String detail = doc.getProperty ("detail", "").toString();
+    bool working = stage == "cutting" || stage == "spotting" || stage == "generating";
+
+    // Within the current clip, the backend may say how far it is (model calls done)
+    const juce::var fractionVar = doc.getProperty ("fraction", juce::var());
+    const bool hasFraction = working && (fractionVar.isDouble() || fractionVar.isInt());
+    const double fraction = hasFraction ? juce::jlimit (0.0, 1.0, (double) fractionVar) : 0.0;
+
+    // The script is alive, so the timeout window starts afresh; the elapsed seconds on
+    // the button keep counting from the real start.
+    lastProgressTime = juce::Time::getCurrentTime();
+
+    // Bar: finished clips plus the backend's share of the current one; full when the script
+    // says it is done; busy animation only while a single clip's backend reports nothing.
+    const bool done = (bool) doc.getProperty ("done", false);
+    progressValue = done ? 1.0
+                  : total > 0 && (total > 1 || hasFraction || ! working)
+                        ? juce::jlimit (0.0, 1.0, (current - (working ? 1.0 : 0.0) + fraction) / total)
+                        : -1.0;
+    juce::String stageText = stage;
+    if (hasFraction)
+        stageText += (detail.isNotEmpty() ? ", " + detail : juce::String())
+                     + ", " + juce::String (juce::roundToInt (fraction * 100.0)) + "%";
+    progressLabel.setText (total > 0 && current > 0 && clip.isNotEmpty()
+                               ? "Clip " + juce::String (current) + " of " + juce::String (total) + ": " + clip + "  (" + stageText + ")"
+                               : stageText,
+                           juce::dontSendNotification);
+}
+
+void PtV2AEditor::resetSpottingUi()
+{
+    actionButton.setEnabled (true);
+    actionButton.setButtonText (idleActionButtonText());
+    spotWholeTrackButton.setEnabled (true);
+    progressBar.setVisible (false);
+    progressLabel.setVisible (false);
+    spottingProgressFile.deleteFile();
+    spottingProgressFile.withFileExtension ("log").deleteFile();
+    spottingProgressFile.withFileExtension ("result.json").deleteFile();
 }
 
