@@ -1,7 +1,11 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <atomic>
 #include <juce_audio_formats/juce_audio_formats.h>  // TASK 7: Audio format I/O for preview
 #include <juce_audio_devices/juce_audio_devices.h>  // TASK 7: AudioTransportSource for preview
+#include <map>
+#include <vector>
+#include "AdapterProfile.h"
 
 /**
  * @class PtV2AProcessor
@@ -78,7 +82,7 @@ public:
     //==============================================================================
     
     /** Plugin name displayed in Pro Tools */
-    const juce::String getName() const override { return "PTV2A"; }  // Match CMakeLists.txt PRODUCT_NAME
+    const juce::String getName() const override { return kPluginName; }  // Match CMakeLists.txt PRODUCT_NAME
     
     /** This plugin does not accept MIDI input */
     bool acceptsMidi() const override { return false; }
@@ -140,26 +144,25 @@ public:
     // MMAudio API Integration (Custom Plugin Functionality)
     //==============================================================================
     
-    /**
-     * Model provider selection
-     * Determines which API to use for audio generation
-     */
-    enum class ModelProvider
-    {
-        MMAudio,              ///< MMAudio API (port 8000, 16kHz/44.1kHz)
-        HunyuanVideoFoley    ///< HunyuanVideo-Foley API (port 8001, 48kHz professional Foley)
-    };
+
     
+    // Plugin identity: the display name in Pro Tools, and the folder under the
+    // user's application-data directory that holds config.json and the log.
+    // companion/api/config.py uses the same folder name; keep them in step.
+    static constexpr const char* kPluginName = "AI Sound Design";
+    static constexpr const char* kUserDataDirName = "AI Sound Design";
+
     // Default configuration values
     static constexpr int DEFAULT_SEED = 42;                    ///< Default random seed for reproducibility
-    static const juce::String DEFAULT_NEGATIVE_PROMPT;         ///< Default sounds to avoid ("voices, music")
+static const juce::String DEFAULT_NEGATIVE_PROMPT;         ///< Default sounds to avoid ("voices, music")
     static const juce::String DEFAULT_API_URL;                 ///< Default MMAudio API endpoint
     
     /** 
-     * Generate audio from video file using MMAudio or HunyuanVideo-Foley API
-     * 
-     * This method spawns a Python subprocess that:
-     * 1. Uploads video to selected API (FastAPI server)
+     * Generate audio from a video file through the selected generation backend
+     *
+     * The backend is whatever adapter profile is selected for "generation"; the
+     * plugin knows no model. This method spawns a Python subprocess that:
+     * 1. Uploads the video to the backend described by the profile
      * 2. Sends text prompt with generation parameters
      * 3. Waits for audio generation (can take 30-60 seconds)
      * 4. Downloads generated audio file (WAV format)
@@ -171,8 +174,7 @@ public:
      * @param prompt            Text prompt describing desired audio (e.g., "thunder and rain")
      * @param negativePrompt    Sounds to avoid (default: "voices, music")
      * @param seed              Random seed for reproducibility (default: 42)
-     * @param modelProvider     Which API to use (MMAudio or HunyuanVideoFoley)
-     * @param modelSize         Model size string (e.g., "large_44k_v2", "xl", "xxl")
+
      * @param videoClipOffset   Timeline position where video clip starts (e.g., "00:02")
      *                          Used to calculate offset into source video for trimming.
      *                          Empty string means video starts at timeline beginning (00:00:00:00)
@@ -192,8 +194,6 @@ public:
         const juce::String& prompt,
         const juce::String& negativePrompt = DEFAULT_NEGATIVE_PROMPT,
         int seed = DEFAULT_SEED,
-        ModelProvider modelProvider = ModelProvider::MMAudio,
-        const juce::String& modelSize = "large_44k_v2",
         const juce::String& videoClipOffset = "",
         float timelineInSeconds = 0.0f,
         float timelineOutSeconds = 0.0f,
@@ -208,7 +208,7 @@ public:
      * Generate audio from text prompt only (T2A mode) - no video input
      * 
      * T2A (Text-to-Audio) workflow:
-     * - Uses MMAudio model only (HunyuanVideo-Foley not supported)
+     * - Needs a generation profile that lists "text_only" in its supports
      * - Generates audio based on text prompt and specified duration
      * - No video file required
      * 
@@ -216,7 +216,6 @@ public:
      * @param duration Audio duration in seconds (4-12s supported)
      * @param negativePrompt Negative prompt (things to avoid)
      * @param seed Random seed for reproducibility
-     * @param modelSize MMAudio model size ("large_44k_v2", etc.)
      * @param errorMessage Optional output parameter for error details
      * 
      * @return Path to generated audio file (WAV) on success, empty string on failure
@@ -228,68 +227,89 @@ public:
         float duration,
         const juce::String& negativePrompt = DEFAULT_NEGATIVE_PROMPT,
         int seed = DEFAULT_SEED,
-        const juce::String& modelSize = "large_44k_v2",
         juce::String* errorMessage = nullptr
     );
     
-    /** 
-     * Get configured API URL from config.json
-     * Reads companion/api/config.json and returns appropriate URL based on use_cloudflared setting
-     * 
-     * @param service Service name ("mmaudio" or "hunyuan")
-     * @return Configured API URL (cloudflared or direct), or DEFAULT_API_URL on error
+    //==============================================================================
+    // Backend settings (config.json, shared with the Python companion scripts)
+    //==============================================================================
+
+    /** One backend the plugin talks to. */
+    struct BackendService
+    {
+        juce::String key;              ///< config.json key, e.g. "mmaudio"
+        juce::String label;            ///< shown in the settings dialog
+        juce::String defaultDirectUrl; ///< localhost default
+    };
+
+    /** The services in the order the settings dialog lists them. */
+    static const std::vector<BackendService>& backendServices();
+
+    /**
+     * Everything the settings dialog edits. Both address sets are kept so that
+     * switching the tunnel on and off loses nothing.
      */
+    struct BackendSettings
+    {
+        bool useTunnel = false;
+        bool saveLogs = true;          ///< write the plugin log file ("save_logs" in config.json)
+        int searchResults = 10;        ///< sounds per recommendation search ("search_results" in config.json)
+        std::map<juce::String, juce::String> adapters;     ///< kind (generation/search/spotting) -> profile file name
+        juce::String clientId;
+        juce::String clientSecret;
+        std::map<juce::String, juce::String> directUrls;   ///< by service key
+        std::map<juce::String, juce::String> tunnelUrls;   ///< by service key
+
+        /** The address in use for a service, falling back to the direct one, then the default. */
+        juce::String activeUrl (const juce::String& serviceKey) const;
+    };
+
+    //==============================================================================
+    // Adapter profiles: one JSON file per backend in getAdapterDir(); the plugin knows
+    // three kinds of service and the profile selected for each, nothing model-specific.
+    //==============================================================================
+
+    using AdapterProfile = ::AdapterProfile;   // defined in AdapterProfile.h, shared with the editor
+
+    /** %APPDATA%/AI Sound Design/adapters (created, and filled with the defaults, on first use). */
+    static juce::File getAdapterDir();
+
+    /** Every valid profile in the folder, sorted by kind then name. */
+    std::vector<AdapterProfile> getAdapterProfiles();
+
+    /** The profile selected for a kind ("generation", "search", "spotting"); invalid if none exists. */
+    AdapterProfile getSelectedAdapter (const juce::String& kind);
+    void setSelectedAdapter (const juce::String& kind, const juce::String& file);
+
+    /** Write a profile's address (base_url, or base_url_tunnel when `tunnel`) back into its file. */
+    bool saveAdapterUrl (const juce::String& file, const juce::String& url, bool tunnel);
+
+    /** Write the lengths a generation backend accepts ("duration": {min, max, default}) into its profile file. */
+    bool saveAdapterDuration (const juce::String& file, double minSeconds, double maxSeconds, double defaultSeconds);
+
+    /** Write a hybrid backend's library-match settings ("match": {pieces_per_10s, layers}) into its profile file,
+        keeping the block's other keys. */
+    bool saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity);
+
+    BackendSettings getBackendSettings();
+    bool saveBackendSettings (const BackendSettings& settings);
+
+    /** The address in use for a service (see BackendSettings::activeUrl). */
     juce::String getConfiguredAPIUrl (const juce::String& service = "mmaudio");
-    
-    /** 
-     * Check if MMAudio API server is reachable
-     * Sends HTTP GET request to /health endpoint
-     * 
-     * @param apiUrl API base URL (default: "http://localhost:8000")
-     * @return true if API responds successfully, false otherwise
+
+    /**
+     * Quick reachability check of a direct backend URL.
+     * Skipped (returns true) when the tunnel is on: those requests carry the
+     * access token and are made by the Python side.
      */
     bool isAPIAvailable (const juce::String& apiUrl = DEFAULT_API_URL);
-    
-    //==============================================================================
-    // Cloudflare Access Credential Management
-    //==============================================================================
-    
-    /**
-     * Get Cloudflare Access Client ID from config.json
-     * @return Client ID string, or empty string if not configured
-     */
-    juce::String getCloudflareClientId();
-    
-    /**
-     * Get Cloudflare Access Client Secret from config.json
-     * @return Client Secret string, or empty string if not configured
-     */
-    juce::String getCloudflareClientSecret();
-    
-    /**
-     * Save Cloudflare Access credentials to config.json
-     * Updates existing config while preserving other settings
-     * 
-     * @param clientId CF-Access-Client-Id (Service Token identifier)
-     * @param clientSecret CF-Access-Client-Secret (Service Token secret)
-     * @return true if credentials saved successfully, false on file write error
-     */
-    bool saveCloudflareCredentials (const juce::String& clientId, 
-                                    const juce::String& clientSecret);
-    
-    /**
-     * Test Cloudflare Access credentials by connecting to API
-     * Calls Python subprocess to validate credentials
-     * 
-     * @param clientId CF-Access-Client-Id to test
-     * @param clientSecret CF-Access-Client-Secret to test
-     * @param errorMessage [OUT] Error details if test fails
-     * @return true if credentials are valid and API accessible
-     */
-    bool testCloudflareCredentials (const juce::String& clientId,
-                                    const juce::String& clientSecret,
-                                    juce::String* errorMessage = nullptr);
-    
+
+    /** The folder holding config.json and the log; created on first use, taking over an older PTV2A config.json when present. */
+    static juce::File getUserDataDir();
+
+    /** config.json inside getUserDataDir(). */
+    static juce::File getConfigFilePath();
+
     /** 
      * Get path to Python API client script (standalone_api_client.py)
      * Searches in following locations (in order):
@@ -319,13 +339,22 @@ public:
      * Creates log file in user's AppData directory
      * Should be called once during plugin initialization
      * 
-     * Log file location:
-     *   Windows: C:\Users\[username]\AppData\Roaming\anonymous\PTV2A\PTV2A.log
-     *   macOS: ~/Library/Application Support/anonymous/PTV2A/PTV2A.log
-     * 
+     * Log file location: getUserDataDir() / "AI Sound Design.log"
+     *   Windows: %APPDATA%\AI Sound Design\
+     *   macOS: ~/Library/AI Sound Design/
+* 
      * @return true if logger initialized successfully
      */
     static bool initializeLogger();
+
+    /** Start or stop writing the log file; the settings dialog calls this when "save_logs" changes. */
+    static void setLoggingEnabled (bool enabled);
+
+    /** Pro Tools tells the plugin the name of the track it is inserted on (AAX track-name notification). */
+    void updateTrackProperties (const TrackProperties& properties) override;
+
+    /** The host track this instance sits on, or empty if the host has not said. */
+    juce::String getHostTrackName() const;
     
     /**
      * Get path to current log file
@@ -497,6 +526,10 @@ public:
      */
     bool isSoundPreviewPlaying() const;
 
+    /** Number of processBlock() calls so far; the preview is only audible while this grows. */
+    juce::uint64 getProcessBlockCount() const noexcept { return processBlockCalls.load(); }
+    double getCurrentSampleRateReported() const noexcept { return lastSampleRate.load(); }
+
 private:
     //==============================================================================
     // Private Members
@@ -504,6 +537,20 @@ private:
     
     // File logger instance (shared across all plugin instances)
     static std::unique_ptr<juce::FileLogger> fileLogger;
+
+    /** The companion process of the current generation; the editor polls it so a crash is
+        reported at once instead of after the timeout. Deleting it does not kill the process. */
+    std::unique_ptr<juce::ChildProcess> generationProcess;
+
+    juce::String hostTrackName;
+    mutable juce::CriticalSection hostTrackNameLock;
+
+    std::atomic<juce::uint64> processBlockCalls { 0 };
+    std::atomic<double> lastSampleRate { 0.0 };
+
+public:
+    juce::ChildProcess* getGenerationProcess() noexcept { return generationProcess.get(); }
+private:
     
     // Currently no persistent state - all parameters are transient in GUI
     // TODO: Add state variables if we want to persist UI settings:
@@ -532,13 +579,7 @@ private:
     // Private Helper Methods
     //==============================================================================
     
-    /**
-     * Get path to config.json file in plugin bundle
-     * @return File object pointing to config.json
-     */
-    juce::File getConfigFilePath();
-    
-    //==============================================================================
+//==============================================================================
     // JUCE Leak Detector (Debug builds only)
     // Ensures no memory leaks in this class
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PtV2AProcessor)

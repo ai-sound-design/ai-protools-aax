@@ -7,6 +7,26 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Native programs (python, pip) write progress and warnings to stderr. Under
+# $ErrorActionPreference = "Stop", Windows PowerShell 5.1 turns those lines into
+# terminating errors even when the program exits with 0. Run them with error
+# handling relaxed and judge success by the exit code instead.
+function Invoke-Native {
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments, [switch]$AllowFailure)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Exe @Arguments
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($code -ne 0 -and -not $AllowFailure) {
+        throw "$Exe $($Arguments -join ' ') failed with exit code $code"
+    }
+    return $code
+}
+
 $PYTHON_VERSION = "3.12.7"
 $RELEASE_DATE = "20241016"
 $BUILD_TYPE = "install_only_stripped"
@@ -15,9 +35,13 @@ $BUILD_NAME = "cpython-${PYTHON_VERSION}+${RELEASE_DATE}-${ARCH}-${BUILD_TYPE}"
 $DOWNLOAD_URL = "https://github.com/astral-sh/python-build-standalone/releases/download/${RELEASE_DATE}/${BUILD_NAME}.tar.gz"
 
 $SCRIPT_DIR = $PSScriptRoot
-$PYTHON_DIR = Join-Path $SCRIPT_DIR "python-windows"
-$OLD_PYTHON_DIR = Join-Path $SCRIPT_DIR "python"
-$DOWNLOAD_FILE = Join-Path $SCRIPT_DIR "${BUILD_NAME}.tar.gz"
+# Install straight into Resources\python: that is where both CMakeLists.txt and
+# the plugin's runtime lookup (PluginProcessor::findPythonExecutable) expect it.
+# Installing anywhere else means the build copies nothing and the plugin finds
+# no interpreter.
+$RESOURCES_DIR = Join-Path $SCRIPT_DIR "Resources"
+$PYTHON_DIR = Join-Path $RESOURCES_DIR "python"
+$DOWNLOAD_FILE = Join-Path $env:TEMP "${BUILD_NAME}.tar.gz"
 
 Write-Host "================================================" -ForegroundColor Cyan
 Write-Host "Python Setup for Windows (python-build-standalone)" -ForegroundColor Cyan
@@ -27,7 +51,7 @@ Write-Host ""
 # Check if Python already exists
 if (Test-Path $PYTHON_DIR) {
     if (-not $Force) {
-        Write-Host "✓ Python already installed at: $PYTHON_DIR" -ForegroundColor Green
+        Write-Host "[OK] Python already installed at: $PYTHON_DIR" -ForegroundColor Green
         Write-Host "Use -Force flag to reinstall" -ForegroundColor Yellow
         exit 0
     }
@@ -35,11 +59,9 @@ if (Test-Path $PYTHON_DIR) {
     Remove-Item -Recurse -Force $PYTHON_DIR
 }
 
-# Backup old Python if exists
-if (Test-Path $OLD_PYTHON_DIR) {
-    $BACKUP_DIR = "${OLD_PYTHON_DIR}_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-    Write-Host "Backing up old Python to: $BACKUP_DIR" -ForegroundColor Yellow
-    Move-Item $OLD_PYTHON_DIR $BACKUP_DIR
+# Make sure Resources/ exists before extracting into it
+if (-not (Test-Path $RESOURCES_DIR)) {
+    New-Item -ItemType Directory -Force -Path $RESOURCES_DIR | Out-Null
 }
 
 # Download Python
@@ -50,9 +72,9 @@ try {
     # Use System.Net.WebClient for better progress
     $webClient = New-Object System.Net.WebClient
     $webClient.DownloadFile($DOWNLOAD_URL, $DOWNLOAD_FILE)
-    Write-Host "✓ Download complete" -ForegroundColor Green
+    Write-Host "[OK] Download complete" -ForegroundColor Green
 } catch {
-    Write-Host "✗ Download failed: $_" -ForegroundColor Red
+    Write-Host "[FAIL] Download failed: $_" -ForegroundColor Red
     exit 1
 }
 
@@ -75,18 +97,18 @@ try {
     Remove-Item -Recurse -Force $TEMP_EXTRACT
     Remove-Item -Force $DOWNLOAD_FILE
     
-    Write-Host "✓ Extraction complete" -ForegroundColor Green
+    Write-Host "[OK] Extraction complete" -ForegroundColor Green
 } catch {
-    Write-Host "✗ Extraction failed: $_" -ForegroundColor Red
+    Write-Host "[FAIL] Extraction failed: $_" -ForegroundColor Red
     Write-Host "Trying alternative method..." -ForegroundColor Yellow
     
     # Fallback: Use 7zip if available
     $sevenZip = "C:\Program Files\7-Zip\7z.exe"
     if (Test-Path $sevenZip) {
         & $sevenZip x $DOWNLOAD_FILE -o"$SCRIPT_DIR" -y
-        Write-Host "✓ Extraction complete (via 7zip)" -ForegroundColor Green
+        Write-Host "[OK] Extraction complete (via 7zip)" -ForegroundColor Green
     } else {
-        Write-Host "✗ Please install tar or 7-Zip to extract the archive" -ForegroundColor Red
+        Write-Host "[FAIL] Please install tar or 7-Zip to extract the archive" -ForegroundColor Red
         exit 1
     }
 }
@@ -94,23 +116,23 @@ try {
 # Verify Python executable
 $PYTHON_EXE = Join-Path $PYTHON_DIR "python.exe"
 if (-not (Test-Path $PYTHON_EXE)) {
-    Write-Host "✗ Python executable not found at: $PYTHON_EXE" -ForegroundColor Red
+    Write-Host "[FAIL] Python executable not found at: $PYTHON_EXE" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "✓ Python installed successfully" -ForegroundColor Green
+Write-Host "[OK] Python installed successfully" -ForegroundColor Green
 
 # Test Python
 Write-Host ""
 Write-Host "Testing Python..." -ForegroundColor Cyan
-& $PYTHON_EXE --version
-& $PYTHON_EXE -c "import sys; print(f'Python path: {sys.executable}')"
+Invoke-Native $PYTHON_EXE @("--version") | Out-Null
+Invoke-Native $PYTHON_EXE @("-c", "import sys; print(sys.executable)") | Out-Null
 
 # Upgrade pip
 Write-Host ""
 Write-Host "Upgrading pip..." -ForegroundColor Cyan
-& $PYTHON_EXE -m ensurepip --upgrade
-& $PYTHON_EXE -m pip install --upgrade pip
+Invoke-Native $PYTHON_EXE @("-m", "ensurepip", "--upgrade") -AllowFailure | Out-Null
+Invoke-Native $PYTHON_EXE @("-m", "pip", "install", "--upgrade", "pip") | Out-Null
 
 # Install runtime dependencies
 Write-Host ""
@@ -127,20 +149,20 @@ $REQUIREMENTS = @(
 
 foreach ($package in $REQUIREMENTS) {
     Write-Host "Installing $package..." -ForegroundColor Gray
-    & $PYTHON_EXE -m pip install --no-cache-dir $package
+    Invoke-Native $PYTHON_EXE @("-m", "pip", "install", "--no-cache-dir", $package) | Out-Null
 }
 
 # Install py-ptsl (editable mode for development)
 Write-Host ""
 Write-Host "Installing py-ptsl (editable)..." -ForegroundColor Cyan
-$PY_PTSL_DIR = Join-Path $SCRIPT_DIR "..\..\..\external\py-ptsl"
+$PY_PTSL_DIR = Join-Path $SCRIPT_DIR "..\external\py-ptsl"
 if (Test-Path $PY_PTSL_DIR) {
-    & $PYTHON_EXE -m pip install -e $PY_PTSL_DIR
-    Write-Host "✓ py-ptsl installed" -ForegroundColor Green
+    Invoke-Native $PYTHON_EXE @("-m", "pip", "install", "-e", $PY_PTSL_DIR) | Out-Null
+    Write-Host "[OK] py-ptsl installed" -ForegroundColor Green
 } else {
-    Write-Host "⚠ py-ptsl not found at: $PY_PTSL_DIR" -ForegroundColor Yellow
+    Write-Host "[WARN] py-ptsl not found at: $PY_PTSL_DIR" -ForegroundColor Yellow
     Write-Host "Installing from git..." -ForegroundColor Yellow
-    & $PYTHON_EXE -m pip install git+https://github.com/iluvcapra/py-ptsl.git
+    Invoke-Native $PYTHON_EXE @("-m", "pip", "install", "git+https://github.com/iluvcapra/py-ptsl.git") | Out-Null
 }
 
 # Verify installations
@@ -153,14 +175,15 @@ print(f'Python: {sys.version}')
 print(f'Executable: {sys.executable}')
 print()
 
-packages = ['grpcio', 'httpx', 'soundfile', 'numpy', 'imageio_ffmpeg', 'psycopg2']
+# Import names, not PyPI names: grpcio installs the module 'grpc'.
+packages = ['grpc', 'httpx', 'soundfile', 'numpy', 'imageio_ffmpeg', 'psycopg2', 'ptsl']
 for pkg in packages:
     try:
         mod = __import__(pkg)
         version = getattr(mod, '__version__', 'unknown')
-        print(f'✓ {pkg}: {version}')
+        print(f'[OK] {pkg}: {version}')
     except ImportError as e:
-        print(f'✗ {pkg}: MISSING')
+        print(f'[FAIL] {pkg}: MISSING')
         sys.exit(1)
 "@
 
@@ -169,7 +192,7 @@ for pkg in packages:
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
     Write-Host "================================================" -ForegroundColor Green
-    Write-Host "✓ Python setup complete!" -ForegroundColor Green
+    Write-Host "[OK] Python setup complete!" -ForegroundColor Green
     Write-Host "================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "Python location: $PYTHON_DIR" -ForegroundColor Cyan
@@ -180,6 +203,6 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "2. Build plugin: cmake --build build --target pt_v2a_AAX" -ForegroundColor Gray
 } else {
     Write-Host ""
-    Write-Host "✗ Setup failed - some packages missing" -ForegroundColor Red
+    Write-Host "[FAIL] Setup failed - some packages missing" -ForegroundColor Red
     exit 1
 }

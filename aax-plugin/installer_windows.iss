@@ -1,17 +1,17 @@
-; Inno Setup Script for PTV2A AAX Plugin (Windows)
+; Inno Setup Script for AI Sound Design AAX plugin (Windows)
 ; Download Inno Setup from: https://jrsoftware.org/isdl.php
 ; Compile with: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer_windows.iss
 
 [Setup]
 ; Basic application info
-AppName=PTV2A Audio Plugin
+AppName=AI Sound Design
 AppVersion=0.1.0
 AppPublisher=anonymous
 AppPublisherURL=https://github.com/ai-sound-design/protools-aax
 AppSupportURL=https://github.com/ai-sound-design/protools-aax/issues
 AppUpdatesURL=https://github.com/ai-sound-design/protools-aax/releases
 DefaultDirName={commoncf}\Avid\Audio\Plug-Ins
-DefaultGroupName=PTV2A
+DefaultGroupName=AI Sound Design
 
 ; Disable directory selection page (fixed install location for Pro Tools)
 DisableDirPage=yes
@@ -19,7 +19,7 @@ DirExistsWarning=no
 
 ; Output configuration
 OutputDir=installer_output
-OutputBaseFilename=PTV2A-Windows-Setup-v0.1.0
+OutputBaseFilename=AI-Sound-Design-Windows-Setup-v0.1.0
 SetupIconFile=Resources\icon.ico
 Compression=lzma2
 SolidCompression=yes
@@ -42,13 +42,13 @@ Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 [Files]
 ; Copy the entire signed AAX plugin folder from staging directory
 ; Installs system-wide to Pro Tools common plugin directory
-Source: "installer_staging\PTV2A.aaxplugin\*"; \
-  DestDir: "{commoncf}\Avid\Audio\Plug-Ins\PTV2A.aaxplugin"; \
+Source: "installer_staging\AI Sound Design.aaxplugin\*"; \
+  DestDir: "{commoncf}\Avid\Audio\Plug-Ins\AI Sound Design.aaxplugin"; \
   Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
 ; Ensure plugin directory exists with proper permissions
-Name: "{commoncf}\Avid\Audio\Plug-Ins\PTV2A.aaxplugin"; Permissions: everyone-readexec
+Name: "{commoncf}\Avid\Audio\Plug-Ins\AI Sound Design.aaxplugin"; Permissions: everyone-readexec
 
 [Icons]
 ; No Start Menu shortcuts needed (plugin only)
@@ -77,11 +77,11 @@ end;
 
 [UninstallDelete]
 ; Clean up config files on uninstall
-Type: filesandordirs; Name: "{userappdata}\PTV2A"
+Type: filesandordirs; Name: "{userappdata}\AI Sound Design"
 
 [Messages]
 ; Custom messages
-WelcomeLabel1=Welcome to PTV2A Audio Plugin Setup
-WelcomeLabel2=This will install the PTV2A AAX plugin for Pro Tools.%n%nThe plugin uses AI to generate audio from video content and provides sound effect search capabilities.%n%nClick Next to continue.
+WelcomeLabel1=Welcome to AI Sound Design Setup
+WelcomeLabel2=This will install the AI Sound Design AAX plugin for Pro Tools.%n%nThe plugin uses AI to generate audio from video content and provides sound effect search capabilities.%n%nClick Next to continue.
 FinishedHeadingLabel=Installation Complete
-FinishedLabelNoIcons=PTV2A has been successfully installed.%n%nThe plugin is now available in Pro Tools under Plug-Ins > Utility > PTV2A.
+FinishedLabelNoIcons=AI Sound Design has been successfully installed.%n%nThe plugin is now available in Pro Tools under Plug-Ins > Utility > AI Sound Design.

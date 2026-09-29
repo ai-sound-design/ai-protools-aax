@@ -40,14 +40,42 @@ except ImportError:
     print("Install with: pip install -e external/py-ptsl", file=sys.stderr)
 
 
+def _convert_to_wav(source: Path) -> Optional[Path]:
+    """Decode `source` to a 24-bit stereo WAV next to it (ffmpeg from imageio-ffmpeg)."""
+    import subprocess
+    import time
+
+    target = source.with_suffix('.wav')
+    if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
+        print(f"[OK] Using existing WAV: {target.name}")
+        return target
+    try:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: ffmpeg not available for WAV conversion: {exc}", file=sys.stderr)
+        return None
+    started = time.time()
+    result = subprocess.run([ffmpeg, "-y", "-v", "error", "-i", str(source), "-vn", "-ac", "2",
+                             "-c:a", "pcm_s24le", str(target)], capture_output=True, text=True)
+    if result.returncode != 0 or not target.exists():
+        print(f"ERROR: WAV conversion failed: {result.stderr.strip()[:300]}", file=sys.stderr)
+        return None
+    print(f"[OK] Converted {source.name} to WAV in {time.time() - started:.1f}s")
+    return target
+
+
 def import_audio_to_pro_tools(
     audio_path: str,
     location: str = "SessionStart",  # For API compatibility with old version (currently unused)
     timecode: str = None,  # Timecode position (e.g., "00:00:07:00")
-    company_name: str = "Master Thesis",
-    app_name: str = "PT V2A Plugin",
+    company_name: str = "AI Sound Design",
+    app_name: str = "Audio import",
     host: str = "localhost",
-    port: int = 31416
+    port: int = 31416,
+    track_name: str = None,   # existing track to place the clip on (the plugin's own track)
+    clip_name: str = None,    # readable clip name instead of the file stem
+    timecode_out: str = None, # end of the selection: a longer clip is trimmed to it
 ) -> bool:
     """
     Import audio file to Pro Tools using py-ptsl library.
@@ -137,6 +165,14 @@ def import_audio_to_pro_tools(
         except Exception as e:
             print(f"ERROR: FLAC conversion failed: {e}", file=sys.stderr)
             return False
+    elif audio_path.suffix.lower() in ('.mp3', '.ogg', '.m4a', '.aac'):
+        # Pro Tools converts compressed files into dual-mono .L/.R clips, which cannot be
+        # spotted onto a stereo track and take long to convert. A stereo WAV imports as one
+        # clip in a fraction of the time.
+        converted = _convert_to_wav(audio_path)
+        if converted is None:
+            return False
+        actual_path = converted
     elif audio_path.suffix.lower() == '.wav':
         print(f"[OK] Audio already in WAV format (no conversion needed)")
     
@@ -184,10 +220,29 @@ def import_audio_to_pro_tools(
             # Determine import timecode position
             import_timecode = timecode if timecode else "00:00:00:00"
             print(f"  Position: {import_timecode}")
+
+            # First choice: onto the track the plugin sits on. Falls back to a new
+            # track when the range there is occupied or the command is unavailable.
+            if track_name:
+                from .place_audio import place_on_track
+                try:
+                    placed = place_on_track(engine, str(actual_path), track_name, import_timecode,
+                                            clip_name=clip_name, log=lambda m: print(f"  {m}"),
+                                            trim_out=timecode_out)
+                except Exception as exc:  # noqa: BLE001
+                    placed = None
+                    print(f"  placing on '{track_name}' failed: {exc}", file=sys.stderr)
+                if placed:
+                    print(f"[SUCCESS] Audio placed on track '{placed}'")
+                    print(f"IMPORT_TRACK={placed}")
+                    return True
+                print(f"  falling back to a new track")
             
-            # Import audio to new track at specified timecode position
-            # Note: Using forward slashes even on Windows (PTSL requirement)
-            file_path = str(actual_path).replace('\\', '/')
+            # Import audio to new track at specified timecode position.
+            # The path goes through as the OS spells it: with forward slashes on
+            # Windows, Pro Tools names the clip and track after the mangled path
+            # ("/Users/<you>/.../generated_42"); with backslashes after the file stem.
+            file_path = str(actual_path)
             
             # Build import manually because engine.import_audio() doesn't set session_path
             # For audio-only import, session_path must be empty string (not None)
@@ -210,10 +265,21 @@ def import_audio_to_pro_tools(
                 audio_data=audio_data
             )
             
+            tracks_before = {t.name for t in engine.track_list()}
+            clips_before = {c["clip_id"] for c in engine.client.run_command(pt.CId_GetClipList, {}).get("clip_list", [])}
             import_start = time.time()
             engine.client.run(import_op)
             import_time = time.time() - import_start
             print(f"  PTSL import operation: {import_time:.2f}s")
+            new_track = None
+            if clip_name:
+                from .place_audio import rename_clip, rename_new_track
+                new_clips = [c for c in engine.client.run_command(pt.CId_GetClipList, {}).get("clip_list", [])
+                             if c["clip_id"] not in clips_before and c.get("clip_type") == "CType_Audio"]
+                rename_clip(engine, new_clips[0]["clip_full_name"] if new_clips else actual_path.stem,
+                            clip_name, lambda m: print(f"  {m}"))
+                new_track = rename_new_track(engine, tracks_before, clip_name, lambda m: print(f"  {m}"))
+            print(f"IMPORT_TRACK={new_track or 'new'}")
             
             # Note: Clip renaming disabled to avoid renaming other selected clips
             # Pro Tools will use the full file path as clip name

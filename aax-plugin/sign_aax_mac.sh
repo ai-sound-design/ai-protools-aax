@@ -11,7 +11,7 @@ WCGUID="7DC00430-D05C-11F0-8D10-00505692AD3E"
 SIGNID="your-certificate-common-name-here"  # Will be set below after certificate creation
 
 # Plugin paths
-PLUGIN_NAME="PTV2A"
+PLUGIN_NAME="AI Sound Design"
 BUILD_CONFIG="Release"  # Change to "Debug" for development
 PROJECT_ROOT="/path/to/protools-aax"
 PLUGIN_PATH="$PROJECT_ROOT/aax-plugin/build/pt_v2a_artefacts/$BUILD_CONFIG/AAX/$PLUGIN_NAME.aaxplugin"

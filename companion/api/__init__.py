@@ -1,13 +1,11 @@
 """
-MMAudio API client utilities
+Backend access for the companion scripts.
 
-Provides:
-- API health checking
-- Audio generation from video
-- Model information retrieval
+Generation, search and spotting backends are described by adapter profiles
+(see adapters.py); config.py holds the shared settings and the plugin's
+config.json.
 """
 
-from .client import generate_audio, check_api_health, get_available_models
 from .config import (
     # Config functions
     get_api_url,
@@ -34,10 +32,6 @@ from .config import (
 DEFAULT_API_URL = MMAUDIO_DEFAULT_API_URL
 
 __all__ = [
-    # Client functions
-    'generate_audio',
-    'check_api_health',
-    'get_available_models',
     'get_api_url',
     # Shared settings
     'SUPPORTED_VIDEO_FORMATS',

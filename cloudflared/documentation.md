@@ -1,7 +1,7 @@
 # Cloudflared Tunnel + Client Configuration
 
 This guide covers the client side of remote access: how the AAX plugin and the companion scripts reach the backend through a Cloudflare Tunnel protected by a Cloudflare Access service token.
-For creating the tunnel and running the connector on the server, see [SETUP.md](../SETUP.md), section "Cloudflared Tunnel".
+Creating the tunnel and running the `cloudflared` connector next to the backend is a server-side task; follow Cloudflare's documentation for Cloudflare Tunnel and Cloudflare Access, then come back here for the plugin side.
 
 ## 1. Create the Cloudflare Access application
 
@@ -21,8 +21,8 @@ For creating the tunnel and running the connector on the server, see [SETUP.md](
 
 The plugin and the companion scripts share one configuration file in the user config directory. It is created with localhost defaults on first run:
 
-- Windows: `%APPDATA%\PTV2A\config.json`
-- macOS: `~/Library/PTV2A/config.json`
+- Windows: `%APPDATA%\AI Sound Design\config.json`
+- macOS: `~/Library/AI Sound Design/config.json`
 
 A complete example is [`companion/api/config.sample.json`](../companion/api/config.sample.json). To route through the tunnel, set `use_cloudflared` to `true`, enter your hostnames, and add the service token:
 
@@ -72,7 +72,7 @@ To override the configured URL for a single call, pass `--api-url`.
 ## 6. Troubleshooting
 
 - If the health check fails, verify:
-  - The tunnel connector is running: `docker compose -f docker-compose.full.yml logs -f cloudflared`
+  - The `cloudflared` connector next to the backend is running.
   - DNS records for the hostnames point to the tunnel.
   - The service token in `config.json` matches the one shown in Cloudflare Access.
 - Confirm the headers work manually:

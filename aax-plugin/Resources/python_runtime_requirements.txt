@@ -1,4 +1,4 @@
-# Python Runtime Requirements for PTV2A Plugin
+# Python Runtime Requirements for AI Sound Design plugin
 # Only packages needed at runtime (no dev tools)
 
 # Pro Tools Script Library (PTSL) Integration

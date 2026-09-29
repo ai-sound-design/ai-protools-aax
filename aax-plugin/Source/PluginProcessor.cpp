@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include <algorithm>
 #include "PluginEditor.h"
 
 //==============================================================================
@@ -20,9 +21,10 @@ PtV2AProcessor::PtV2AProcessor()
                     .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                     .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
-    // Initialize file logger on first plugin instance
-    // This ensures logs are captured from plugin startup
-    initializeLogger();
+    // Initialize file logger on first plugin instance, unless the user turned
+    // log saving off in the settings ("save_logs" in config.json).
+    if (getBackendSettings().saveLogs)
+        initializeLogger();
     
     // TASK 7: Initialize audio format manager for preview playback
     // Register basic formats (WAV, AIFF, FLAC, MP3)
@@ -32,6 +34,7 @@ PtV2AProcessor::PtV2AProcessor()
 void PtV2AProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     // TASK 7: Prepare preview transport for playback
+    lastSampleRate.store (sampleRate);
     previewTransport.prepareToPlay (samplesPerBlock, sampleRate);
     
     // Allocate preview mix buffer (stereo)
@@ -57,6 +60,8 @@ void PtV2AProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     // Pass-through: do not modify audio from input
     // (Plugin does not process real-time audio)
     
+    processBlockCalls.fetch_add (1, std::memory_order_relaxed);
+
     // TASK 7: Mix preview audio if active
     if (previewTransport.isPlaying())
     {
@@ -108,7 +113,7 @@ juce::String PtV2AProcessor::getPythonExecutable()
     auto pluginDir = pluginFile.getParentDirectory(); // This is x64/ directory
     
     // Go up to Contents/ directory, then find Resources/
-    // Structure: PTV2A.aaxplugin/Contents/x64/PTV2A.aaxplugin (binary)
+    // Structure: <Plugin>.aaxplugin/Contents/x64/<Plugin>.aaxplugin (binary)
     //                                    /Resources/python/python.exe
     auto contentsDir = pluginDir.getParentDirectory(); // Go from x64/ to Contents/
     
@@ -209,7 +214,7 @@ juce::File PtV2AProcessor::getAPIClientScript()
     juce::Logger::writeToLog ("=== API Client Script Search ===");
     
     // Try embedded script first (production/installed builds)
-    // Structure: PTV2A.aaxplugin/Contents/Resources/python/Scripts/standalone_api_client.py
+    // Structure: <Plugin>.aaxplugin/Contents/Resources/python/Scripts/standalone_api_client.py
     auto embeddedScript = contentsDir.getChildFile("Resources")
                                      .getChildFile("python")
                                      .getChildFile("Scripts")
@@ -325,78 +330,190 @@ juce::File PtV2AProcessor::getAPIClientScript()
     return juce::File();
 }
 
-juce::String PtV2AProcessor::getConfiguredAPIUrl (const juce::String& service)
+//==============================================================================
+// Adapter profiles
+//==============================================================================
+
+juce::File PtV2AProcessor::getAdapterDir()
 {
-    juce::Logger::writeToLog ("=== Loading API URL from config.json ===");
-    
-    // Get config.json from user config directory (matches Python companion/api/config.py)
-    // macOS: ~/Library/PTV2A/config.json
-    // Windows: %APPDATA%/PTV2A/config.json
-    auto userConfigDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                                    .getChildFile("PTV2A");
-    
-    auto configFile = userConfigDir.getChildFile("config.json");
-    
-    juce::Logger::writeToLog ("Config path: " + configFile.getFullPathName());
-    
-    if (!configFile.existsAsFile())
+    return getUserDataDir().getChildFile ("adapters");
+}
+
+std::vector<PtV2AProcessor::AdapterProfile> PtV2AProcessor::getAdapterProfiles()
+{
+    auto dir = getAdapterDir();
+    if (dir.getNumberOfChildFiles (juce::File::findFiles, "*.json") == 0)
     {
-        juce::Logger::writeToLog ("⚠️ config.json not found, using default URL");
-        return DEFAULT_API_URL;
-    }
-    
-    // Read and parse JSON
-    auto jsonText = configFile.loadFileAsString();
-    auto json = juce::JSON::parse (jsonText);
-    
-    if (auto* root = json.getDynamicObject())
-    {
-        bool useCloudflared = root->getProperty ("use_cloudflared");
-        juce::Logger::writeToLog ("use_cloudflared: " + juce::String(useCloudflared ? "true" : "false"));
-        
-        if (auto* services = root->getProperty ("services").getDynamicObject())
+        // First use: let the companion write the default profiles (single source of truth).
+        auto script = getAPIClientScript();
+        if (script.existsAsFile())
         {
-            if (auto* serviceConfig = services->getProperty (service).getDynamicObject())
-            {
-                juce::String apiUrl;
-                
-                if (useCloudflared)
-                {
-                    apiUrl = serviceConfig->getProperty ("api_url_cloudflared").toString();
-                    if (apiUrl.isEmpty())
-                        apiUrl = serviceConfig->getProperty ("api_url_direct").toString();
-                }
-                else
-                {
-                    apiUrl = serviceConfig->getProperty ("api_url_direct").toString();
-                }
-                
-                if (apiUrl.isNotEmpty())
-                {
-                    juce::Logger::writeToLog ("✓ Loaded API URL: " + apiUrl);
-                    return apiUrl;
-                }
-            }
+            juce::ChildProcess seed;
+            juce::StringArray cmd { getPythonExecutable(), "-X", "utf8", script.getFullPathName(),
+                                    "--action", "ensure_adapters" };
+            if (seed.start (cmd))
+                seed.waitForProcessToFinish (20000);
+            juce::Logger::writeToLog ("Adapter profiles created in " + dir.getFullPathName());
         }
     }
-    
-    juce::Logger::writeToLog ("⚠️ Failed to parse config.json, using default URL");
-    return DEFAULT_API_URL;
+
+    std::vector<AdapterProfile> profiles;
+    for (const auto& entry : juce::RangedDirectoryIterator (dir, false, "*.json"))
+    {
+        auto json = juce::JSON::parse (entry.getFile().loadFileAsString());
+        auto* obj = json.getDynamicObject();
+        if (obj == nullptr)
+            continue;
+        AdapterProfile p;
+        p.file = entry.getFile().getFileName();
+        p.name = obj->getProperty ("name").toString();
+        p.kind = obj->getProperty ("kind").toString();
+        p.baseUrl = obj->getProperty ("base_url").toString();
+        p.tunnelUrl = obj->getProperty ("base_url_tunnel").toString();
+        p.health = obj->hasProperty ("health") ? obj->getProperty ("health").toString() : juce::String ("/health");
+        p.protocol = obj->getProperty ("protocol").toString();
+        if (auto* arr = obj->getProperty ("supports").getArray())
+            for (const auto& v : *arr)
+                p.supports.add (v.toString());
+        if (auto* dur = obj->getProperty ("duration").getDynamicObject())
+        {
+            p.minDuration = (double) dur->getProperty ("min");
+            p.maxDuration = (double) dur->getProperty ("max");
+            p.defaultDuration = dur->hasProperty ("default") ? (double) dur->getProperty ("default")
+                                                              : (p.minDuration + p.maxDuration) / 2.0;
+            if (p.minDuration <= 0.0 || p.maxDuration < p.minDuration)     // nonsense: fall back
+            {
+                p.minDuration = 4.0; p.maxDuration = 12.0; p.defaultDuration = 8.0;
+            }
+        }
+        if (auto* match = obj->getProperty ("match").getDynamicObject())
+        {
+            p.piecesPer10s = juce::jlimit (1, 20, (int) match->getProperty ("pieces_per_10s"));
+            p.layers = juce::jlimit (1, 10, (int) match->getProperty ("layers"));
+            if (match->hasProperty ("min_similarity"))
+                p.minSimilarity = juce::jlimit (0.0, 1.0, (double) match->getProperty ("min_similarity"));
+        }
+        if (p.name.isEmpty() || ! (p.kind == "generation" || p.kind == "search" || p.kind == "spotting" || p.kind == "hybrid"))
+            continue;
+        profiles.push_back (std::move (p));
+    }
+    std::sort (profiles.begin(), profiles.end(), [] (const AdapterProfile& a, const AdapterProfile& b)
+    {
+        return a.kind != b.kind ? a.kind < b.kind : a.name.compareIgnoreCase (b.name) < 0;
+    });
+    return profiles;
+}
+
+PtV2AProcessor::AdapterProfile PtV2AProcessor::getSelectedAdapter (const juce::String& kind)
+{
+    auto profiles = getAdapterProfiles();
+    auto settings = getBackendSettings();
+    auto wanted = settings.adapters.find (kind);
+
+    AdapterProfile fallback;
+    for (const auto& p : profiles)
+    {
+        if (p.kind != kind)
+            continue;
+        if (wanted != settings.adapters.end() && p.file == wanted->second)
+            return p;
+        // Nothing chosen yet: the shipped default first, else the first of its kind.
+        const bool shipped = p.file == "mmaudio.json" || p.file == "sound_search.json" || p.file == "spotting.json"
+                          || p.file == "hybrid.json";
+        if (! fallback.isValid() || shipped)
+            fallback = p;
+    }
+    return fallback;
+}
+
+void PtV2AProcessor::setSelectedAdapter (const juce::String& kind, const juce::String& file)
+{
+    auto settings = getBackendSettings();
+    if (settings.adapters[kind] == file)
+        return;
+    settings.adapters[kind] = file;
+    saveBackendSettings (settings);
+    juce::Logger::writeToLog ("Adapter for " + kind + ": " + file);
+}
+
+bool PtV2AProcessor::saveAdapterUrl (const juce::String& file, const juce::String& url, bool tunnel)
+{
+    auto target = getAdapterDir().getChildFile (file);
+    auto json = juce::JSON::parse (target.loadFileAsString());
+    auto* obj = json.getDynamicObject();
+    if (obj == nullptr)
+        return false;
+    obj->setProperty (tunnel ? "base_url_tunnel" : "base_url", url.trim());
+    return target.replaceWithText (juce::JSON::toString (json, false));
+}
+
+bool PtV2AProcessor::saveAdapterDuration (const juce::String& file, double minSeconds, double maxSeconds, double defaultSeconds)
+{
+    auto target = getAdapterDir().getChildFile (file);
+    auto json = juce::JSON::parse (target.loadFileAsString());
+    auto* obj = json.getDynamicObject();
+    if (obj == nullptr)
+        return false;
+    auto* block = new juce::DynamicObject();
+    block->setProperty ("min", minSeconds);
+    block->setProperty ("max", maxSeconds);
+    block->setProperty ("default", defaultSeconds);
+    obj->setProperty ("duration", juce::var (block));
+    return target.replaceWithText (juce::JSON::toString (json, false));
+}
+
+bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity)
+{
+    auto target = getAdapterDir().getChildFile (file);
+    auto json = juce::JSON::parse (target.loadFileAsString());
+    auto* obj = json.getDynamicObject();
+    if (obj == nullptr)
+        return false;
+    auto* block = obj->getProperty ("match").getDynamicObject();
+    if (block == nullptr)
+    {
+        block = new juce::DynamicObject();
+        obj->setProperty ("match", juce::var (block));
+    }
+    block->setProperty ("pieces_per_10s", piecesPer10s);
+    block->setProperty ("layers", layers);
+    block->setProperty ("min_similarity", minSimilarity);
+    return target.replaceWithText (juce::JSON::toString (json, false));
+}
+
+juce::String PtV2AProcessor::getConfiguredAPIUrl (const juce::String& service)
+{
+    // Legacy service keys map onto the selected adapter of that kind.
+    static const std::map<juce::String, juce::String> kinds {
+        { "mmaudio", "generation" },
+        { "sound_search", "search" }, { "spotting", "spotting" }, { "hybrid", "hybrid" } };
+
+    if (auto kind = kinds.find (service); kind != kinds.end())
+    {
+        auto adapter = getSelectedAdapter (kind->second);
+        if (adapter.isValid())
+        {
+            auto url = adapter.activeUrl (getBackendSettings().useTunnel);
+            juce::Logger::writeToLog ("Backend URL for " + service + " (" + adapter.name + "): " + url);
+            return url;
+        }
+    }
+    auto url = getBackendSettings().activeUrl (service);
+    juce::Logger::writeToLog ("Backend URL for " + service + ": " + url);
+    return url;
 }
 
 bool PtV2AProcessor::isAPIAvailable (const juce::String& apiUrl)
 {
-    // Skip C++ HTTP check for Cloudflare URLs
-    // JUCE's WinHTTP has SSL/TLS issues with Cloudflare Access
-    // Python scripts handle Cloudflare authentication properly
-    if (apiUrl.contains ("cloudflare") || apiUrl.contains ("example.com"))
+    // Tunnelled requests carry the access token; the Python side makes those.
+    if (getBackendSettings().useTunnel)
     {
-        juce::Logger::writeToLog ("Cloudflare URL detected, skipping C++ health check (Python handles auth)");
-        return true;  // Python will do the actual check with proper SSL/auth
+        juce::Logger::writeToLog ("Tunnel enabled, skipping C++ health check (Python handles auth)");
+        return true;
     }
-    
-    // Simple health check for localhost: try to reach API root endpoint
-    juce::URL healthCheck (apiUrl + "/");
+
+    // Any backend that answers its health endpoint counts; no product names are checked.
+    juce::URL healthCheck (apiUrl.trimCharactersAtEnd ("/") + "/health");
     int statusCode = 0;
     
     juce::Logger::writeToLog ("Checking local API: " + apiUrl);
@@ -410,12 +527,9 @@ bool PtV2AProcessor::isAPIAvailable (const juce::String& apiUrl)
     
     if (inputStream != nullptr && statusCode >= 200 && statusCode < 300)
     {
-        juce::String response = inputStream->readEntireStreamAsString();
-        if (response.contains ("MMAudio") || response.contains ("status") || response.contains ("HunyuanVideo"))
-        {
-            juce::Logger::writeToLog ("✓ Local API available");
-            return true;
-        }
+        inputStream->readEntireStreamAsString();
+        juce::Logger::writeToLog ("✓ Local API available");
+        return true;
     }
     
     juce::Logger::writeToLog ("✗ Local API not available (status: " + juce::String (statusCode) + ")");
@@ -427,8 +541,6 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     const juce::String& prompt,
     const juce::String& negativePrompt,
     int seed,
-    ModelProvider modelProvider,
-    const juce::String& modelSize,
     const juce::String& videoClipOffset,
     float timelineInSeconds,
     float timelineOutSeconds,
@@ -438,10 +550,10 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     bool fullPrecision,
     juce::String* errorMessage)
 {
-    // Log provider-specific information
-    juce::String providerName = (modelProvider == ModelProvider::MMAudio) ? "MMAudio" : "HunyuanVideo-Foley";
-    juce::Logger::writeToLog ("=== " + providerName + " Generation Started ===");
-    juce::Logger::writeToLog ("Model: " + providerName + " / " + modelSize);
+    const auto adapter = getSelectedAdapter ("generation");
+    juce::Logger::writeToLog ("=== Generation Started ===");
+    juce::Logger::writeToLog ("Backend: " + (adapter.isValid() ? adapter.name + " (" + adapter.file + ")"
+                                                              : juce::String ("none selected")));
     juce::Logger::writeToLog ("Video: " + videoFile.getFullPathName());
     juce::Logger::writeToLog ("Prompt: " + prompt);
     juce::Logger::writeToLog ("Negative Prompt: " + negativePrompt);
@@ -460,23 +572,18 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     // Get Python executable
     auto pythonExe = getPythonExecutable();
     
-    // Get API client script based on selected provider
-    juce::File scriptFile;
-    if (modelProvider == ModelProvider::MMAudio)
+    // The selected adapter profile describes the backend; without one there is
+    // nothing to talk to.
+    if (! adapter.isValid())
     {
-        scriptFile = getAPIClientScript();  // Uses standalone_api_client.py
-        juce::Logger::writeToLog ("Using MMAudio client script: " + scriptFile.getFullPathName());
+        juce::String error = "No generation backend selected. Open Settings and pick or add an adapter profile.";
+        juce::Logger::writeToLog ("ERROR: " + error);
+        if (errorMessage != nullptr)
+            *errorMessage = error;
+        return {};
     }
-    else if (modelProvider == ModelProvider::HunyuanVideoFoley)
-    {
-        // Get hunyuanvideo_foley_api_client.py from companion directory
-        // First get MMAudio script to find companion directory
-        auto mmAudioScript = getAPIClientScript();
-        auto companionDir = mmAudioScript.getParentDirectory();
-        scriptFile = companionDir.getChildFile ("hunyuanvideo_foley_api_client.py");
-        juce::Logger::writeToLog ("Using HunyuanVideo-Foley client script: " + scriptFile.getFullPathName());
-    }
-    
+    auto scriptFile = getAPIClientScript();
+
     if (!scriptFile.existsAsFile())
     {
         juce::String error = "API client script not found: " + scriptFile.getFullPathName();
@@ -519,41 +626,9 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     commandArray.add ("--seed");
     commandArray.add (juce::String (seed));
     
-    // Add model-specific arguments
-    if (modelProvider == ModelProvider::MMAudio)
-    {
-        // MMAudio uses --model <model_name>
-        // UI values: "Large" → "large_44k_v2", "Medium" → "medium_44k", "Small" → "small_16k"
-        juce::String modelArg;
-        if (modelSize.contains ("Large"))
-            modelArg = "large_44k_v2";
-        else if (modelSize.contains ("Medium"))
-            modelArg = "medium_44k";
-        else if (modelSize.contains ("Small"))
-            modelArg = "small_16k";
-        else
-            modelArg = "large_44k_v2";  // Default fallback
-        
-        commandArray.add ("--model");
-        commandArray.add (modelArg);
-        juce::Logger::writeToLog ("MMAudio model: " + modelArg);
-    }
-    else if (modelProvider == ModelProvider::HunyuanVideoFoley)
-    {
-        // HunyuanVideo-Foley uses --model-size <xl|xxl>
-        // UI values: "XL (8-12GB VRAM)" → "xl", "XXL (16-20GB VRAM)" → "xxl"
-        juce::String modelSizeArg;
-        if (modelSize.contains ("XL") && !modelSize.contains ("XXL"))
-            modelSizeArg = "xl";
-        else if (modelSize.contains ("XXL"))
-            modelSizeArg = "xxl";
-        else
-            modelSizeArg = "xxl";  // Default fallback
-        
-        commandArray.add ("--model-size");
-        commandArray.add (modelSizeArg);
-        juce::Logger::writeToLog ("HunyuanVideo-Foley model size: " + modelSizeArg);
-    }
+    // The profile tells the script where the backend is and how to build the request
+    commandArray.add ("--adapter");
+    commandArray.add (adapter.file);
     
     // WORKFLOW 1: Manual offset WITH clip bounds (trimmed clip + manual offset)
     // Priority: Manual offset > Clip bounds > Auto-detect
@@ -622,16 +697,7 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     commandArray.add ("--output");
     commandArray.add (outputsDir.getFullPathName());  // Explicit output directory
     
-    // Add full precision flag if enabled
-    if (fullPrecision)
-    {
-        commandArray.add ("--full-precision");
-        juce::Logger::writeToLog ("Using full precision mode (float32)");
-    }
-    else
-    {
-        juce::Logger::writeToLog ("Using default precision (bfloat16)");
-    }
+    juce::ignoreUnused (fullPrecision);   // precision is the backend's business; kept for the call sites
     
     // NOTE: No --import-to-protools flag - plugin will handle PTSL import async!
     // NOTE: Removed --quiet for debugging - we want to see Python output!
@@ -642,18 +708,14 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     juce::Logger::writeToLog ("Server will generate filename with prompt snippet");
     juce::Logger::writeToLog ("Command: " + commandArray.joinIntoString (" "));
     
-    // Execute subprocess in BACKGROUND (non-blocking)
-    // CRITICAL: We use a fire-and-forget approach
-    // We start the process and immediately return, letting Python run independently
-    // The Editor will poll for the output file to detect completion
+    // The process runs in the background; the editor polls the output directory for
+    // the WAV and, through getGenerationProcess(), notices when the script exits
+    // without one (backend crashed, request refused) instead of waiting for the timeout.
+    generationProcess = std::make_unique<juce::ChildProcess>();
     
-    // Start process with JUCE ChildProcess
-    // We allocate on heap so we can control its lifetime
-    auto* backgroundProcess = new juce::ChildProcess();
-    
-    if (!backgroundProcess->start (commandArray))
+    if (!generationProcess->start (commandArray))
     {
-        delete backgroundProcess;
+        generationProcess.reset();
         juce::String error = "Failed to start Python process";
         juce::Logger::writeToLog ("ERROR: " + error);
         if (errorMessage != nullptr)
@@ -661,13 +723,7 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
         return {};
     }
     
-    juce::Logger::writeToLog ("✓ Python process started successfully (running independently)");
-    
-    // IMPORTANT: We intentionally leak this ChildProcess object!
-    // If we delete it, the process gets killed
-    // Python will run independently and we poll for the file instead
-    // The OS will clean up the process when it finishes
-    // Memory leak is acceptable here (one-time allocation per generation)
+    juce::Logger::writeToLog ("✓ Python process started (background)");
     
     // NOTE: Server generates filename with prompt snippet, so we can't predict the exact name
     // Instead, we return the output directory path
@@ -691,20 +747,19 @@ juce::String PtV2AProcessor::generateAudioTextOnly (
     float duration,
     const juce::String& negativePrompt,
     int seed,
-    const juce::String& modelSize,
     juce::String* errorMessage)
 {
     juce::Logger::writeToLog ("=== T2A Generation Started (text-only) ===");
-    juce::Logger::writeToLog ("Model: MMAudio / " + modelSize);
+
     juce::Logger::writeToLog ("Duration: " + juce::String (duration, 1) + "s");
     juce::Logger::writeToLog ("Prompt: " + prompt);
     juce::Logger::writeToLog ("Negative Prompt: " + negativePrompt);
     juce::Logger::writeToLog ("Seed: " + juce::String (seed));
     
-    // Validate inputs
-    if (duration < 4.0f || duration > 12.0f)
+    // Validate inputs against what the selected backend accepts
+    if (const auto limits = getSelectedAdapter ("generation"); limits.isValid() && ! limits.acceptsDuration (duration))
     {
-        juce::String error = "T2A duration must be 4-12 seconds, got: " + juce::String (duration, 1) + "s";
+        juce::String error = limits.name + " generates " + limits.durationRange() + ", got: " + juce::String (duration, 1) + "s";
         juce::Logger::writeToLog ("ERROR: " + error);
         if (errorMessage != nullptr)
             *errorMessage = error;
@@ -758,20 +813,19 @@ juce::String PtV2AProcessor::generateAudioTextOnly (
     commandArray.add ("--seed");
     commandArray.add (juce::String (seed));
     
-    // MMAudio model argument
-    juce::String modelArg;
-    if (modelSize.contains ("Large"))
-        modelArg = "large_44k_v2";
-    else if (modelSize.contains ("Medium"))
-        modelArg = "medium_44k";
-    else if (modelSize.contains ("Small"))
-        modelArg = "small_16k";
-    else
-        modelArg = "large_44k_v2";  // Default
-    
-    commandArray.add ("--model");
-    commandArray.add (modelArg);
-    juce::Logger::writeToLog ("MMAudio model: " + modelArg);
+    // The selected adapter profile tells the script where the backend is
+    const auto adapter = getSelectedAdapter ("generation");
+    if (! adapter.isValid())
+    {
+        juce::String error = "No generation backend selected. Open Settings and pick or add an adapter profile.";
+        juce::Logger::writeToLog ("ERROR: " + error);
+        if (errorMessage != nullptr)
+            *errorMessage = error;
+        return {};
+    }
+    commandArray.add ("--adapter");
+    commandArray.add (adapter.file);
+    juce::Logger::writeToLog ("Using adapter profile: " + adapter.file + " (" + adapter.name + ")");
     
     // Output settings
     auto tempDir = juce::File::getSpecialLocation (juce::File::tempDirectory);
@@ -825,12 +879,9 @@ bool PtV2AProcessor::initializeLogger()
     if (fileLogger != nullptr)
         return true;
     
-    // Get user's app data directory
-    // Windows: C:\Users\[username]\AppData\Roaming\PTV2A\
-    // macOS: ~/Library/Application Support/PTV2A/
-    auto logDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                       .getChildFile ("PTV2A");
-    
+    // Same folder as config.json (see getUserDataDir)
+    auto logDir = getUserDataDir();
+
     // Ensure directory exists
     if (!logDir.exists())
     {
@@ -865,15 +916,14 @@ bool PtV2AProcessor::initializeLogger()
     if (deletedCount > 0)
         std::cout << "Cleaned up " << deletedCount << " old log files" << std::endl;
     
-    // Create log file: PTV2A.log
-    auto logFile = logDir.getChildFile ("PTV2A.log");
-    
+    auto logFile = logDir.getChildFile (juce::String (kPluginName) + ".log");
+
     // Create FileLogger instance
     // Parameters: logFile, welcomeMessage, maxInitialFileSizeBytes
     fileLogger = std::make_unique<juce::FileLogger> (
         logFile,
-        "PTV2A Plugin Log",
-        1024 * 1024 * 5  // 5 MB max log file size (then rotates)
+        juce::String (kPluginName) + " Plugin Log",
+1024 * 1024 * 5  // 5 MB max log file size (then rotates)
     );
     
     // Set as default logger for all juce::Logger::writeToLog() calls
@@ -881,12 +931,41 @@ bool PtV2AProcessor::initializeLogger()
     
     // Write startup message
     juce::Logger::writeToLog ("===========================================");
-    juce::Logger::writeToLog ("PTV2A Plugin Started");
+    juce::Logger::writeToLog (juce::String (kPluginName) + " Plugin Started");
     juce::Logger::writeToLog ("Log file: " + logFile.getFullPathName());
     juce::Logger::writeToLog ("Timestamp: " + juce::Time::getCurrentTime().toString (true, true));
     juce::Logger::writeToLog ("===========================================");
     
     return true;
+}
+
+void PtV2AProcessor::updateTrackProperties (const TrackProperties& properties)
+{
+    if (properties.name.has_value())
+    {
+        const juce::ScopedLock sl (hostTrackNameLock);
+        hostTrackName = *properties.name;
+    }
+}
+
+juce::String PtV2AProcessor::getHostTrackName() const
+{
+    const juce::ScopedLock sl (hostTrackNameLock);
+    return hostTrackName;
+}
+
+void PtV2AProcessor::setLoggingEnabled (bool enabled)
+{
+    if (enabled)
+    {
+        initializeLogger();
+        return;
+    }
+    if (fileLogger == nullptr)
+        return;
+    juce::Logger::writeToLog ("Log saving turned off in the settings; no further lines are written.");
+    juce::Logger::setCurrentLogger (nullptr);   // writeToLog() then goes to the debugger only
+    fileLogger.reset();
 }
 
 juce::File PtV2AProcessor::getLogFile()
@@ -995,7 +1074,7 @@ PtV2AProcessor::VideoSelectionInfo PtV2AProcessor::getVideoSelectionInfo()
     juce::String scriptPath = scriptDir.getFullPathName();
     
     // Create log file for Python stderr output (separate from stdout)
-    auto logDir = getLogFile().getParentDirectory();
+    auto logDir = getUserDataDir();
     auto pythonLogFile = logDir.getChildFile ("python_stderr.log");
     juce::String pythonLogPath = pythonLogFile.getFullPathName();
     
@@ -1051,7 +1130,8 @@ PtV2AProcessor::VideoSelectionInfo PtV2AProcessor::getVideoSelectionInfo()
     // Log output to file for debugging AND display
     if (output.isNotEmpty())
     {
-        pythonLogFile.replaceWithText (output);
+        if (fileLogger != nullptr)                  // log saving is on
+            pythonLogFile.replaceWithText (output);
         juce::Logger::writeToLog ("Python output captured:");
         juce::Logger::writeToLog (output);
     }
@@ -1509,246 +1589,163 @@ bool PtV2AProcessor::validateVideoDuration(
 // Cloudflare Access Credential Management Implementation
 //==============================================================================
 
+const std::vector<PtV2AProcessor::BackendService>& PtV2AProcessor::backendServices()
+{
+    static const std::vector<BackendService> services {
+        { "mmaudio",      "MMAudio (generation)",            "http://localhost:8000" },
+
+        { "sound_search", "Sound search (BBC archive)",      "http://localhost:8002" },
+        { "spotting",     "Spotting",                        "http://localhost:8003" },
+    };
+    return services;
+}
+
+juce::String PtV2AProcessor::BackendSettings::activeUrl (const juce::String& serviceKey) const
+{
+    if (useTunnel)
+    {
+        auto it = tunnelUrls.find (serviceKey);
+        if (it != tunnelUrls.end() && it->second.isNotEmpty())
+            return it->second;
+    }
+    auto it = directUrls.find (serviceKey);
+    if (it != directUrls.end() && it->second.isNotEmpty())
+        return it->second;
+    for (const auto& service : backendServices())
+        if (service.key == serviceKey)
+            return service.defaultDirectUrl;
+    return DEFAULT_API_URL;
+}
+
+juce::File PtV2AProcessor::getUserDataDir()
+{
+    // Windows: %APPDATA%\AI Sound Design   macOS: ~/Library/AI Sound Design
+    // (JUCE's userApplicationDataDirectory is ~/Library on macOS, not
+    // ~/Library/Application Support). companion/api/config.py resolves the same
+    // folder, so plugin and scripts read one config.json.
+    auto appData = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
+    auto dir = appData.getChildFile (kUserDataDirName);
+
+    if (! dir.exists())
+    {
+        dir.createDirectory();
+        // First run after the rename: carry the old settings over.
+        auto legacy = appData.getChildFile ("PTV2A").getChildFile ("config.json");
+        if (legacy.existsAsFile())
+            legacy.copyFileTo (dir.getChildFile ("config.json"));
+    }
+    return dir;
+}
+
 juce::File PtV2AProcessor::getConfigFilePath()
 {
-    // Store config in the user config directory (writable location, shared with companion/api/config.py)
-    // macOS: ~/Library/PTV2A/config.json
-    // Windows: %APPDATA%/PTV2A/config.json
-    auto appDataDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
-    auto configDir = appDataDir.getChildFile ("PTV2A");
-    
-    // Ensure directory exists
-    if (!configDir.exists())
-        configDir.createDirectory();
-    
-    return configDir.getChildFile ("config.json");
+    return getUserDataDir().getChildFile ("config.json");
 }
 
-juce::String PtV2AProcessor::getCloudflareClientId()
+PtV2AProcessor::BackendSettings PtV2AProcessor::getBackendSettings()
 {
+    BackendSettings settings;
+    for (const auto& service : backendServices())
+        settings.directUrls[service.key] = service.defaultDirectUrl;
+
     auto configFile = getConfigFilePath();
-    if (!configFile.existsAsFile())
+    if (! configFile.existsAsFile())
     {
-        // Create default config with full structure on first run
-        juce::DynamicObject::Ptr defaultConfig = new juce::DynamicObject();
-        defaultConfig->setProperty ("use_cloudflared", false);  // default: local backend, see README "Connecting the Plugin to Your Backend"
-        
-        // Services
-        juce::DynamicObject::Ptr services = new juce::DynamicObject();
-        
-        juce::DynamicObject::Ptr mmaudio = new juce::DynamicObject();
-        mmaudio->setProperty ("api_url_direct", "http://localhost:8000");
-        mmaudio->setProperty ("api_url_cloudflared", "https://mmaudio.example.com");
-        services->setProperty ("mmaudio", juce::var (mmaudio.get()));
-        
-        juce::DynamicObject::Ptr hunyuan = new juce::DynamicObject();
-        hunyuan->setProperty ("api_url_direct", "http://localhost:8001");
-        hunyuan->setProperty ("api_url_cloudflared", "https://hyvf.example.com");
-        services->setProperty ("hunyuan", juce::var (hunyuan.get()));
-        
-        juce::DynamicObject::Ptr soundSearch = new juce::DynamicObject();
-        soundSearch->setProperty ("api_url_direct", "http://localhost:8002");
-        soundSearch->setProperty ("api_url_cloudflared", "https://sounds.example.com");
-        services->setProperty ("sound_search", juce::var (soundSearch.get()));
-        
-        defaultConfig->setProperty ("services", juce::var (services.get()));
-        
-        // Credentials
-        defaultConfig->setProperty ("cf_access_client_id", "");
-        defaultConfig->setProperty ("cf_access_client_secret", "");
-        
-        auto jsonString = juce::JSON::toString (juce::var (defaultConfig.get()), true);
-        configFile.replaceWithText (jsonString);
-        
-        return {};
+        saveBackendSettings (settings);  // write the defaults so the Python side finds a file too
+        return settings;
     }
-    
+
     auto json = juce::JSON::parse (configFile.loadFileAsString());
-    if (auto* root = json.getDynamicObject())
-        return root->getProperty ("cf_access_client_id").toString();
-    
-    return {};
+    auto* root = json.getDynamicObject();
+    if (root == nullptr)
+    {
+        juce::Logger::writeToLog ("config.json could not be parsed, using defaults: " + configFile.getFullPathName());
+        return settings;
+    }
+
+    settings.useTunnel = (bool) root->getProperty ("use_cloudflared");
+    if (root->hasProperty ("save_logs"))
+        settings.saveLogs = (bool) root->getProperty ("save_logs");
+    if (root->hasProperty ("search_results"))
+        settings.searchResults = juce::jlimit (1, 200, (int) root->getProperty ("search_results"));
+    if (auto* adapters = root->getProperty ("adapters").getDynamicObject())
+        for (const auto& entry : adapters->getProperties())
+            settings.adapters[entry.name.toString()] = entry.value.toString();
+    settings.clientId = root->getProperty ("cf_access_client_id").toString();
+    settings.clientSecret = root->getProperty ("cf_access_client_secret").toString();
+
+    if (auto* services = root->getProperty ("services").getDynamicObject())
+    {
+        for (const auto& entry : services->getProperties())
+        {
+            if (auto* service = entry.value.getDynamicObject())
+            {
+                const auto key = entry.name.toString();
+                auto direct = service->getProperty ("api_url_direct").toString();
+                if (direct.isNotEmpty())
+                    settings.directUrls[key] = direct;
+                settings.tunnelUrls[key] = service->getProperty ("api_url_cloudflared").toString();
+            }
+        }
+    }
+    return settings;
 }
 
-juce::String PtV2AProcessor::getCloudflareClientSecret()
+bool PtV2AProcessor::saveBackendSettings (const BackendSettings& settings)
 {
     auto configFile = getConfigFilePath();
-    if (!configFile.existsAsFile())
-        return {};
-    
-    auto json = juce::JSON::parse (configFile.loadFileAsString());
-    if (auto* root = json.getDynamicObject())
-        return root->getProperty ("cf_access_client_secret").toString();
-    
-    return {};
-}
 
-bool PtV2AProcessor::saveCloudflareCredentials (const juce::String& clientId,
-                                                const juce::String& clientSecret)
-{
-    juce::Logger::writeToLog ("=== Saving Cloudflare Credentials ===");
-    
-    auto configFile = getConfigFilePath();
-    
-    juce::Logger::writeToLog ("Config file: " + configFile.getFullPathName());
-    
-    // Load existing config or create new
+    // Start from the file on disk so keys this dialog does not know survive.
     juce::var json;
     if (configFile.existsAsFile())
-    {
         json = juce::JSON::parse (configFile.loadFileAsString());
-        juce::Logger::writeToLog ("Loaded existing config.json");
-    }
-    
-    if (!json.getDynamicObject())
-    {
-        json = new juce::DynamicObject();
-        juce::Logger::writeToLog ("Created new config object");
-    }
-    
-    // Update credentials
+    if (json.getDynamicObject() == nullptr)
+        json = juce::var (new juce::DynamicObject());
     auto* root = json.getDynamicObject();
-    root->setProperty ("cf_access_client_id", clientId);
-    root->setProperty ("cf_access_client_secret", clientSecret);
-    
-    juce::Logger::writeToLog ("Client ID: " + clientId);
-    juce::Logger::writeToLog ("Client Secret: " + clientSecret.substring(0, 10) + "...");
-    
-    // Write to file with pretty formatting
-    auto jsonString = juce::JSON::toString (json, false, 2);  // 2-space indent
-    
-    if (configFile.replaceWithText (jsonString))
-    {
-        juce::Logger::writeToLog ("✓ Credentials saved successfully");
-        return true;
-    }
-    else
-    {
-        juce::Logger::writeToLog ("✗ Failed to write config.json");
-        return false;
-    }
-}
 
-bool PtV2AProcessor::testCloudflareCredentials (const juce::String& clientId,
-                                                const juce::String& clientSecret,
-                                                juce::String* errorMessage)
-{
-    juce::Logger::writeToLog ("=== Testing Cloudflare Credentials ===");
-    juce::Logger::writeToLog ("Client ID: " + clientId);
-    juce::Logger::writeToLog ("Client Secret: " + clientSecret.substring(0, 10) + "...");
-    
-    auto pythonExe = getPythonExecutable();
-    auto scriptFile = getAPIClientScript();
-    
-    if (!scriptFile.existsAsFile())
+    root->setProperty ("use_cloudflared", settings.useTunnel);
+    root->setProperty ("save_logs", settings.saveLogs);
+    root->setProperty ("search_results", settings.searchResults);
     {
-        juce::String errorMsg = "API client script not found";
-        juce::Logger::writeToLog ("ERROR: " + errorMsg);
-        if (errorMessage != nullptr)
-            *errorMessage = errorMsg;
-        return false;
+        juce::var adaptersVar (new juce::DynamicObject());
+        for (const auto& kv : settings.adapters)
+            adaptersVar.getDynamicObject()->setProperty (kv.first, kv.second);
+        root->setProperty ("adapters", adaptersVar);
     }
-    
-    // Build command: python standalone_api_client.py --action test_cloudflare 
-    //                --cf-client-id "xxx" --cf-client-secret "xxx"
-    juce::StringArray commandArray;
-    commandArray.add (pythonExe);
-    commandArray.add ("-X");
-    commandArray.add ("utf8");
-    commandArray.add (scriptFile.getFullPathName());
-    commandArray.add ("--action");
-    commandArray.add ("test_cloudflare");
-    commandArray.add ("--cf-client-id");
-    commandArray.add (clientId);
-    commandArray.add ("--cf-client-secret");
-    commandArray.add (clientSecret);
-    
-    juce::Logger::writeToLog ("Executing credential test command...");
-    juce::Logger::writeToLog ("Command: " + commandArray.joinIntoString (" "));
-    
-    // Create child process
-    juce::ChildProcess process;
-    
-    if (!process.start (commandArray))
+    root->setProperty ("cf_access_client_id", settings.clientId);
+    root->setProperty ("cf_access_client_secret", settings.clientSecret);
+
+    juce::var servicesVar = root->getProperty ("services");
+    if (servicesVar.getDynamicObject() == nullptr)
+        servicesVar = juce::var (new juce::DynamicObject());
+    auto* services = servicesVar.getDynamicObject();
+
+    auto allKeys = std::vector<juce::String>();
+    for (const auto& service : backendServices())
+        allKeys.push_back (service.key);
+    for (const auto& kv : settings.directUrls)
+        if (std::find (allKeys.begin(), allKeys.end(), kv.first) == allKeys.end())
+            allKeys.push_back (kv.first);
+
+    for (const auto& key : allKeys)
     {
-        juce::String errorMsg = "Failed to start Python process";
-        juce::Logger::writeToLog ("ERROR: " + errorMsg);
-        if (errorMessage != nullptr)
-            *errorMessage = errorMsg;
-        return false;
+        juce::var serviceVar = services->getProperty (key);
+        if (serviceVar.getDynamicObject() == nullptr)
+            serviceVar = juce::var (new juce::DynamicObject());
+        auto* service = serviceVar.getDynamicObject();
+
+        auto direct = settings.directUrls.find (key);
+        auto tunnel = settings.tunnelUrls.find (key);
+        service->setProperty ("api_url_direct", direct != settings.directUrls.end() ? direct->second : juce::String());
+        service->setProperty ("api_url_cloudflared", tunnel != settings.tunnelUrls.end() ? tunnel->second : juce::String());
+        services->setProperty (key, serviceVar);
     }
-    
-    // Wait for completion (should be fast, <5 seconds)
-    if (!process.waitForProcessToFinish (10000))  // 10 second timeout
-    {
-        juce::String errorMsg = "Credential test timed out";
-        juce::Logger::writeToLog ("ERROR: " + errorMsg);
-        process.kill();
-        if (errorMessage != nullptr)
-            *errorMessage = errorMsg;
-        return false;
-    }
-    
-    // Read output
-    auto output = process.readAllProcessOutput().trim();
-    juce::Logger::writeToLog ("Python output: " + output);
-    
-    // Extract JSON from output (might have debug lines before/after)
-    // Look for lines starting with { (JSON response)
-    auto lines = juce::StringArray::fromLines (output);
-    juce::String jsonOutput;
-    for (const auto& line : lines)
-    {
-        if (line.trimStart().startsWith ("{"))
-        {
-            jsonOutput = line.trim();
-            break;  // Found JSON response
-        }
-    }
-    
-    if (jsonOutput.isEmpty())
-    {
-        juce::String errorMsg = "No JSON response found in Python output";
-        juce::Logger::writeToLog ("ERROR: " + errorMsg);
-        juce::Logger::writeToLog ("Full output was: " + output);
-        if (errorMessage != nullptr)
-            *errorMessage = errorMsg;
-        return false;
-    }
-    
-    juce::Logger::writeToLog ("Extracted JSON: " + jsonOutput);
-    
-    // Parse JSON response
-    auto json = juce::JSON::parse (jsonOutput);
-    if (auto* obj = json.getDynamicObject())
-    {
-        bool success = obj->getProperty ("success");
-        auto errorFromJson = obj->getProperty ("error").toString();
-        
-        if (success)
-        {
-            juce::Logger::writeToLog ("=== Credential Test SUCCESS ===");
-            juce::Logger::writeToLog ("Credentials are valid and API is accessible");
-            if (errorMessage != nullptr)
-                *errorMessage = "";
-            return true;
-        }
-        else
-        {
-            juce::Logger::writeToLog ("=== Credential Test FAILED ===");
-            juce::Logger::writeToLog ("ERROR: " + errorFromJson);
-            if (errorMessage != nullptr)
-                *errorMessage = errorFromJson;
-            return false;
-        }
-    }
-    
-    juce::String errorMsg = "Failed to parse credential test response";
-    juce::Logger::writeToLog ("ERROR: " + errorMsg);
-    juce::Logger::writeToLog ("Raw output was: " + output);
-    if (errorMessage != nullptr)
-        *errorMessage = errorMsg;
-    return false;
+    root->setProperty ("services", servicesVar);
+
+    const bool ok = configFile.replaceWithText (juce::JSON::toString (json, false, 2));
+    juce::Logger::writeToLog (ok ? "Settings saved to " + configFile.getFullPathName()
+                                 : "Failed to write " + configFile.getFullPathName());
+    return ok;
 }
 
 //==============================================================================

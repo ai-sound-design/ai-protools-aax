@@ -44,6 +44,9 @@ LOG_FILE = os.path.join(tempfile.gettempdir(), "sound_search_debug.log")
 def log_debug(msg):
     """Write debug message to log file ONLY (not to stderr to avoid mixing with JSON output)"""
     try:
+        from api.config import logs_enabled
+        if not logs_enabled():
+            return
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{timestamp}] {msg}\n")
@@ -281,6 +284,7 @@ def action_search(args):
             "description": sound["description"],
             "category": sound["category"],
             "similarity": sound["similarity"],
+            "duration_seconds": sound.get("duration_seconds", 0),
             "file_path": sound.get("file_path", ""),  # Include but may not be needed yet
         })
     

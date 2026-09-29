@@ -29,7 +29,7 @@ Features:
 
 Note:
     This file has been refactored. Core functionality moved to:
-    - api/client.py: API communication
+    - api/adapters.py: adapter profiles and the generation request
     - api/config.py: Configuration constants
     - video/ffmpeg.py: FFmpeg operations
     - video/validation.py: Video validation
@@ -47,17 +47,10 @@ from typing import Optional
 
 # Import from refactored modules
 from api import (
-    generate_audio,
-    check_api_health,
-    get_available_models,
     get_api_url,
-    DEFAULT_API_URL,
     SUPPORTED_VIDEO_FORMATS,
     DEFAULT_NEGATIVE_PROMPT,
     DEFAULT_SEED,
-    MMAUDIO_DEFAULT_NUM_STEPS,
-    MMAUDIO_DEFAULT_CFG_STRENGTH,
-    MMAUDIO_DEFAULT_MODEL,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_TIMEOUT,
     VIDEO_DOWNSCALE_THRESHOLD_MB,
@@ -121,8 +114,7 @@ Examples:
     --seed 42 \\
     --output /path/to/custom_output.flac \\
     --duration 10.0 \\
-    --steps 30 \\
-    --cfg-strength 5.0
+    --adapter mmaudio.json
         """
     )
     
@@ -152,7 +144,7 @@ Examples:
         '--seed', '-s',
         type=int,
         default=DEFAULT_SEED,
-        help=f'Random seed for reproducible results (default: {DEFAULT_SEED})'
+        help=f'Seed; -1 draws a random one and logs it, any other value reproduces a result (default: {DEFAULT_SEED})'
     )
     
     # Output options
@@ -213,24 +205,10 @@ Examples:
     )
     
     parser.add_argument(
-        '--model',
+        '--adapter',
         type=str,
-        default=MMAUDIO_DEFAULT_MODEL,
-        help=f'Model variant to use (default: {MMAUDIO_DEFAULT_MODEL})'
-    )
-    
-    parser.add_argument(
-        '--steps',
-        type=int,
-        default=MMAUDIO_DEFAULT_NUM_STEPS,
-        help=f'Number of generation steps (default: {MMAUDIO_DEFAULT_NUM_STEPS})'
-    )
-    
-    parser.add_argument(
-        '--cfg-strength',
-        type=float,
-        default=MMAUDIO_DEFAULT_CFG_STRENGTH,
-        help=f'CFG strength for prompt guidance (default: {MMAUDIO_DEFAULT_CFG_STRENGTH})'
+        help='Adapter profile (file name in the adapters folder, or a path) describing the generation '
+             'backend. Default: the profile selected in the plugin.'
     )
     
     parser.add_argument(
@@ -241,18 +219,12 @@ Examples:
         help=f'Output audio format: "flac" (smaller) or "wav" (Pro Tools compatible, default: {DEFAULT_OUTPUT_FORMAT})'
     )
     
-    parser.add_argument(
-        '--full-precision',
-        action='store_true',
-        help='Use full precision mode (float32) instead of default bfloat16. Higher quality but slower.'
-    )
-    
     # API options
     parser.add_argument(
         '--api-url',
         type=str,
-        default=None,  # Will be set to get_api_url("mmaudio") if not provided
-        help=f'API server URL (default: from config.json or {DEFAULT_API_URL})'
+        default=None,
+        help='Backend address (default: the address of the adapter profile)'
     )
     
     parser.add_argument(
@@ -279,15 +251,20 @@ Examples:
     parser.add_argument(
         '--action',
         type=str,
-        choices=['generate', 't2a', 'check_ffmpeg', 'get_video_selection', 'get_video_file', 'get_video_info', 'trim_video', 'validate_duration', 'get_duration', 'import_audio', 'clip_detect_and_trim', 'get_clip_bounds', 'test_cloudflare'],
+        choices=['generate', 't2a', 'check_ffmpeg', 'get_video_selection', 'get_video_file', 'get_video_info', 'trim_video', 'validate_duration', 'get_duration', 'import_audio', 'clip_detect_and_trim', 'get_clip_bounds', 'resolve_video_segments', 'test_cloudflare', 'list_adapters', 'ensure_adapters'],
         default='generate',
         help='Action to perform (default: generate)'
     )
     
     # Cloudflare credential test parameters
     parser.add_argument(
+        '--whole-track',
+        action='store_true',
+        help='resolve_video_segments: use the whole video track instead of the timeline selection'
+    )
+    parser.add_argument(
         '--cf-client-id',
-        type=str,
+type=str,
         help='Cloudflare Access Client ID (for test_cloudflare action)'
     )
     
@@ -318,6 +295,18 @@ Examples:
     )
     
     # Audio import timecode position
+    parser.add_argument(
+        '--track-name',
+        help='Existing track to place the imported clip on (import_audio action); new track if omitted or occupied'
+    )
+    parser.add_argument(
+        '--clip-name',
+        help='Name for the imported clip (import_audio action)'
+    )
+    parser.add_argument(
+        '--timecode-out',
+        help='End of the selection (import_audio action): a longer clip is trimmed to it'
+    )
     parser.add_argument(
         '--timecode',
         type=str,
@@ -382,7 +371,7 @@ def get_user_inputs_interactive():
         negative_prompt = DEFAULT_NEGATIVE_PROMPT
     
     while True:
-        seed_input = input(f"🎲 Seed (Default: {DEFAULT_SEED}): ").strip()
+        seed_input = input(f"🎲 Seed (-1 = random, default: {DEFAULT_SEED}): ").strip()
         if not seed_input:
             seed = DEFAULT_SEED
             break
@@ -405,6 +394,22 @@ def main():
     # Parse command line arguments  
     args = parse_arguments()
     
+    # Adapter profile: where the generation backend runs and how to talk to it.
+    # Named on the command line, else the profile selected in the plugin.
+    from api.adapters import load_profile, profile_url, selected_profile
+    if getattr(args, 'adapter', None):
+        adapter_profile = load_profile(args.adapter)
+        if adapter_profile is None:
+            print(json.dumps({"success": False, "error": f"adapter profile not found: {args.adapter}"}))
+            return 1
+    else:
+        adapter_profile = selected_profile("generation")
+    if adapter_profile is not None:
+        if args.api_url:
+            # An explicit address wins over the profile's, e.g. to try a backend on another port
+            adapter_profile = dict(adapter_profile, base_url=args.api_url, base_url_tunnel="")
+        args.api_url = profile_url(adapter_profile)
+
     # Set API URL from config if not explicitly provided
     if args.api_url is None:
         args.api_url = get_api_url("mmaudio")
@@ -413,12 +418,16 @@ def main():
     import tempfile
     log_file = os.path.join(tempfile.gettempdir(), "pt_v2a_debug.log")
     
+    from api.config import logs_enabled
+    write_log_file = logs_enabled()
+
     def log_debug(msg):
-        """Write to file and stderr for maximum visibility"""
-        with open(log_file, "a", encoding="utf-8") as f:
-            timestamp = __import__('datetime').datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{timestamp}] {msg}\n")
-            f.flush()
+        """Write to file (unless log saving is off in the settings) and stderr"""
+        if write_log_file:
+            with open(log_file, "a", encoding="utf-8") as f:
+                timestamp = __import__('datetime').datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{timestamp}] {msg}\n")
+                f.flush()
         # Only write to stderr (not stdout) to avoid duplication in plugin output
         print(msg, file=sys.stderr)
         sys.stderr.flush()
@@ -506,6 +515,18 @@ def main():
         
         return safe_action_wrapper(get_clip_bounds_logic)
     
+    elif args.action == 'resolve_video_segments':
+        """Map the timeline selection (any track) onto the video clips beneath it"""
+        def resolve_video_segments_logic():
+            from ptsl import open_engine
+            from ptsl_integration.video_segments import resolve_video_segments
+
+            log_debug(f"=== DEBUG: resolve_video_segments START (whole_track={args.whole_track}) ===")
+            with open_engine(company_name="AI Sound Design", application_name="Video segments") as engine:
+                return resolve_video_segments(engine, whole_track=args.whole_track, log=log_debug)
+
+        return safe_action_wrapper(resolve_video_segments_logic)
+
     elif args.action == 'get_video_info':
         """Get timeline selection AND video file in one PTSL call (faster!)"""
         return safe_action_wrapper(lambda: action_get_video_info(log_debug_func=log_debug))
@@ -558,6 +579,15 @@ def main():
         """Get video file duration using FFprobe"""
         return safe_action_wrapper(lambda: action_get_duration(video_path=args.video, log_debug_func=log_debug))
     
+    elif args.action in ('list_adapters', 'ensure_adapters'):
+        """Adapter profiles for the plugin: the folder, every profile, the selection per kind."""
+        def adapters_logic():
+            from api.adapters import describe, ensure_default_profiles
+            ensure_default_profiles()
+            return describe()
+
+        return safe_action_wrapper(adapters_logic)
+
     elif args.action == 'import_audio':
         """Import audio file to Pro Tools timeline"""
         def import_audio_logic():
@@ -583,7 +613,10 @@ def main():
             return action_import_audio(
                 audio_path=args.audio_path,
                 timecode=timecode,
-                log_debug_func=log_debug
+                log_debug_func=log_debug,
+                track_name=getattr(args, 'track_name', None) or None,
+                clip_name=getattr(args, 'clip_name', None) or None,
+                timecode_out=getattr(args, 'timecode_out', None) or None,
             )
         
         return safe_action_wrapper(import_audio_logic)
@@ -819,30 +852,25 @@ def main():
             print(f"\n🔗 Checking API connection to {args.api_url}...")
         
         print(f"=== DEBUG: Checking API health at {args.api_url} ===", file=sys.stderr)
-        
-        if not check_api_health(args.api_url, quiet=quiet):
-            error_msg = f"API not available at {args.api_url}"
+
+        if adapter_profile is None:
+            error_msg = ("no generation backend: no adapter profile is selected and none was given "
+                         "with --adapter (see the plugin's Settings, Open Adapter Folder)")
+            print(f"ERROR: {error_msg}", file=sys.stderr)
+            return 1
+
+        from api.adapters import check_health, generate_with_profile
+        healthy, note = check_health(adapter_profile)
+        if not healthy:
+            error_msg = f"{adapter_profile.get('name', 'The backend')} is not reachable at {args.api_url}: {note}"
             print(f"ERROR: {error_msg}", file=sys.stderr)
             if not quiet:
-                print("\n💡 Make sure the API server is running on server:")
-                print("   docker restart mmaudio-api")
-                print("   # or: python main.py")
+                print("\n💡 Make sure the backend is running and the address in Settings is right.")
             return 1
-        
+
         print(f"=== DEBUG: API health check passed ===", file=sys.stderr)
-        
         if not quiet:
-            print("✅ API is online!")
-        
-        # Get available models (optional info)
-        if verbose and not quiet:
-            models_info = get_available_models(args.api_url, quiet=quiet)
-            if models_info:
-                loaded_models = models_info.get("loaded_models", [])
-                if loaded_models:
-                    print(f"📦 Loaded models: {', '.join(loaded_models)}")
-                else:
-                    print("📦 No models loaded yet (will load on first request)")
+            print("✅ Backend is online!")
         
         # === Video Preprocessing (Downscaling) ===
         # Check if video needs downscaling BEFORE workflow processing
@@ -1272,24 +1300,22 @@ def main():
             else:
                 log_debug(f"=== DEBUG: Untrimmed video size OK, no downscaling needed ===")
         
-        # Generate audio
-        output_file = generate_audio(
-            api_url=args.api_url,
-            video_path=video_path,
+        # Generate audio through the adapter profile: it knows the endpoint, the
+        # field names and how the answer is read. The plugin knows no model.
+        import tempfile as _tempfile
+        adapter_out_dir = args.output if args.output and not Path(args.output).suffix else \
+            str(Path(_tempfile.gettempdir()) / "pt_v2a_outputs")
+        output_file = generate_with_profile(
+            adapter_profile,
+            video_path=None if is_t2a_mode else video_path,
             prompt=prompt,
             negative_prompt=negative_prompt,
             seed=seed,
-            model_name=args.model,
             duration=args.duration,
-            num_steps=args.steps,
-            cfg_strength=args.cfg_strength,
+            output_dir=adapter_out_dir,
             output_format=args.output_format,
-            output_path=args.output,
-            use_temp=args.temp,
             timeout=args.timeout,
-            quiet=quiet,
-            verbose=verbose,
-            full_precision=args.full_precision
+            log=lambda m: print(m, file=sys.stderr),
         )
         
         if output_file:

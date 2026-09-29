@@ -1,290 +1,263 @@
 #include "SoundRecommendationsComponent.h"
 
 //==============================================================================
-// Constructor
+struct SoundRecommendationsComponent::Row : public juce::Component
+{
+    Row (SoundRecommendationsComponent& o) : owner (o)
+    {
+        play.onClick = [this] { owner.playClicked (rowIndex); };
+        import.onClick = [this] { owner.importClicked (rowIndex); };
+        text.setJustificationType (juce::Justification::centredLeft);
+        text.setFont (juce::Font (13.0f));
+        text.setInterceptsMouseClicks (false, false);
+        meta.setJustificationType (juce::Justification::centredRight);
+        meta.setFont (juce::Font (12.0f));
+        meta.setColour (juce::Label::textColourId, juce::Colours::grey);
+        meta.setInterceptsMouseClicks (false, false);
+        addAndMakeVisible (play);
+        addAndMakeVisible (text);
+        addAndMakeVisible (meta);
+        addAndMakeVisible (import);
+    }
+
+    void update (int index, const SoundResult& sound)
+    {
+        rowIndex = index;
+        text.setText (sound.description, juce::dontSendNotification);
+        juce::String info = sound.category;
+        if (sound.durationSeconds > 0.0f)
+        {
+            int secs = juce::roundToInt (sound.durationSeconds);
+            info += (info.isEmpty() ? "" : "   ") + juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2);
+        }
+        if (sound.similarity > 0.0f)
+            info += (info.isEmpty() ? "" : "   ") + juce::String (juce::roundToInt (sound.similarity * 100.0f)) + " %";
+        meta.setText (info, juce::dontSendNotification);
+
+        const bool previewing = owner.previewingId == sound.id;
+        const bool loading = owner.loadingPreviewId == sound.id;
+        play.setButtonText (previewing ? juce::String (juce::CharPointer_UTF8 ("\xe2\x96\xa0"))     // ■
+                          : loading    ? juce::String ("...")
+                                       : juce::String (juce::CharPointer_UTF8 ("\xe2\x96\xb6")));   // ▶
+        play.setEnabled (! loading);
+        play.setTooltip (previewing ? "Stop preview" : "Preview this sound");
+
+        const bool downloading = owner.downloadingSounds.count (sound.id) > 0;
+        const bool downloaded = owner.downloadedSounds.count (sound.id) > 0;
+        import.setButtonText (downloading ? "Loading..." : downloaded ? "Import" : "Import");
+        import.setEnabled (! downloading);
+        import.setTooltip (downloaded ? "Place this sound at the selection"
+                                      : "Download this sound and place it at the selection");
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (4, 3);
+        play.setBounds (r.removeFromLeft (30));
+        r.removeFromLeft (8);
+        import.setBounds (r.removeFromRight (74));
+        r.removeFromRight (8);
+        meta.setBounds (r.removeFromRight (170));
+        text.setBounds (r);
+    }
+
+    SoundRecommendationsComponent& owner;
+    int rowIndex = 0;
+    juce::TextButton play, import;
+    juce::Label text, meta;
+};
+
 //==============================================================================
 SoundRecommendationsComponent::SoundRecommendationsComponent()
 {
-    // Configure header label
-    headerLabel.setText (juce::CharPointer_UTF8 ("\xf0\x9f\x8e\xb5 Database Recommendations [0/0]"), juce::dontSendNotification);  // 🎵
-    headerLabel.setJustificationType (juce::Justification::centred);
+    headerLabel.setJustificationType (juce::Justification::centredLeft);
     headerLabel.setFont (juce::Font (14.0f, juce::Font::bold));
     addAndMakeVisible (headerLabel);
-    
-    // Configure sound name label (display box)
-    soundNameLabel.setText ("No results", juce::dontSendNotification);
-    soundNameLabel.setJustificationType (juce::Justification::centredLeft);
-    soundNameLabel.setFont (juce::Font (13.0f));
-    soundNameLabel.setColour (juce::Label::backgroundColourId, juce::Colours::darkgrey.darker());
-    soundNameLabel.setColour (juce::Label::textColourId, juce::Colours::white);
-    soundNameLabel.setColour (juce::Label::outlineColourId, juce::Colours::grey);
-    addAndMakeVisible (soundNameLabel);
-    
-    // Configure buttons with click handlers
-    prevButton.onClick = [this] { handlePrevClicked(); };
-    addAndMakeVisible (prevButton);
-    
-    nextButton.onClick = [this] { handleNextClicked(); };
-    addAndMakeVisible (nextButton);
-    
-    downloadButton.onClick = [this] { handleDownloadClicked(); };
-    addAndMakeVisible (downloadButton);
-    
-    importButton.onClick = [this] { handleImportClicked(); };
-    addAndMakeVisible (importButton);
-    
-    // Initially hidden until results are set
+
+    listBox.setModel (this);
+    listBox.setRowHeight (rowHeight);
+    listBox.setMultipleSelectionEnabled (false);
+    listBox.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff232323));
+    listBox.setColour (juce::ListBox::outlineColourId, juce::Colours::grey);
+    listBox.setOutlineThickness (1);
+    addAndMakeVisible (listBox);
+
+    clearResults();
     setVisible (false);
 }
 
-//==============================================================================
-// JUCE Component Lifecycle
-//==============================================================================
+SoundRecommendationsComponent::~SoundRecommendationsComponent()
+{
+    stopTimer();
+    listBox.setModel (nullptr);
+}
+
 void SoundRecommendationsComponent::paint (juce::Graphics& g)
 {
-    // Draw component background
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId).darker (0.3f));
-    
-    // Draw border
     g.setColour (juce::Colours::grey);
     g.drawRect (getLocalBounds(), 1);
 }
 
 void SoundRecommendationsComponent::resized()
 {
-    auto area = getLocalBounds().reduced (10);
-    
-    // Header: "🎵 Database Recommendations [1/5]"
-    auto headerRow = area.removeFromTop (25);
-    headerLabel.setBounds (headerRow);
-    
-    area.removeFromTop (8);  // Spacing
-    
-    // Sound name display box
-    auto soundNameRow = area.removeFromTop (30);
-    soundNameLabel.setBounds (soundNameRow);
-    
-    area.removeFromTop (12);  // Spacing
-    
-    // Button row: [◀ Prev] ... [▶ Preview] [↓ Import] ... [Next ▶]
-    auto buttonRow = area.removeFromTop (28);
-    
-    const int buttonWidth = 100;
-    const int spacing = 20;
-    
-    // Prev button at left edge w padding
-    buttonRow.removeFromLeft (20);
-    prevButton.setBounds (buttonRow.removeFromLeft (buttonWidth));
-
-    // Next button at right edge w padding
-    buttonRow.removeFromRight (20);
-    nextButton.setBounds (buttonRow.removeFromRight (buttonWidth));
-    
-    // Center Download and Import in remaining space
-    const int centerWidth = buttonWidth * 2 + spacing;
-    const int centerStartX = (buttonRow.getWidth() - centerWidth) / 2;
-    
-    buttonRow.removeFromLeft (centerStartX);
-    downloadButton.setBounds (buttonRow.removeFromLeft (buttonWidth));
-    buttonRow.removeFromLeft (spacing);
-    importButton.setBounds (buttonRow.removeFromLeft (buttonWidth));
+    auto area = getLocalBounds().reduced (border);
+    headerLabel.setBounds (area.removeFromTop (headerHeight));
+    listBox.setBounds (area);
 }
 
 //==============================================================================
-// Public Interface
-//==============================================================================
 void SoundRecommendationsComponent::setResults (const std::vector<SoundResult>& results)
 {
+    if (previewingId != -1 && onPreview)
+        onPreview (SoundResult { previewingId }, false);
+    previewingId = -1;
+    loadingPreviewId = -1;
+    stopTimer();
+
     soundResults = results;
-    currentIndex = 0;
-    
-    updateDisplay();
-    setVisible (!soundResults.empty());
+    downloadedSounds.clear();
+    downloadingSounds.clear();
+    for (const auto& sound : soundResults)
+        if (sound.localPath.isNotEmpty())
+            downloadedSounds[sound.id] = sound.localPath;
+
+    headerLabel.setText ("Database Recommendations (" + juce::String (soundResults.size()) + ")"
+                         + (soundResults.empty() ? "" : juce::String ("   ") + juce::String (juce::CharPointer_UTF8 ("\xe2\x96\xb6"))
+                                                        + " preview, Import places the sound at the selection"),
+                         juce::dontSendNotification);
+    listBox.updateContent();
+    listBox.deselectAllRows();
+    listBox.repaint();
+    setVisible (! soundResults.empty());
 }
 
 void SoundRecommendationsComponent::clearResults()
 {
-    soundResults.clear();
-    currentIndex = 0;
-    downloadedSounds.clear();
-    updateDisplay();
-    setVisible (false);
+    setResults ({});
 }
 
 const SoundResult* SoundRecommendationsComponent::getCurrentSound() const
 {
-    if (soundResults.empty() || currentIndex < 0 || currentIndex >= static_cast<int>(soundResults.size()))
+    int row = listBox.getSelectedRow();
+    if (row < 0 || row >= getResultCount())
         return nullptr;
-    
-    return &soundResults[currentIndex];
+    return &soundResults[(size_t) row];
 }
 
 //==============================================================================
-// Event Handlers
+void SoundRecommendationsComponent::paintListBoxItem (int row, juce::Graphics& g, int width, int height, bool selected)
+{
+    if (selected)
+        g.fillAll (juce::Colour (0xff2f5f9f).withAlpha (0.45f));
+    else if (row % 2 == 1)
+        g.fillAll (juce::Colours::white.withAlpha (0.03f));
+    g.setColour (juce::Colours::white.withAlpha (0.08f));
+    g.drawHorizontalLine (height - 1, 0.0f, (float) width);
+}
+
+juce::Component* SoundRecommendationsComponent::refreshComponentForRow (int row, bool, juce::Component* existing)
+{
+    if (row < 0 || row >= getResultCount())
+    {
+        delete existing;
+        return nullptr;
+    }
+    auto* line = dynamic_cast<Row*> (existing);
+    if (line == nullptr)
+    {
+        delete existing;
+        line = new Row (*this);
+    }
+    line->update (row, soundResults[(size_t) row]);
+    return line;
+}
+
+void SoundRecommendationsComponent::listBoxItemDoubleClicked (int row, const juce::MouseEvent&)
+{
+    playClicked (row);
+}
+
+void SoundRecommendationsComponent::refreshRows()
+{
+    listBox.repaint();
+    for (int row = 0; row < getResultCount(); ++row)
+        if (auto* line = dynamic_cast<Row*> (listBox.getComponentForRowNumber (row)))
+            line->update (row, soundResults[(size_t) row]);
+}
+
 //==============================================================================
-void SoundRecommendationsComponent::handlePrevClicked()
+void SoundRecommendationsComponent::playClicked (int row)
 {
-    if (soundResults.empty())
+    if (row < 0 || row >= getResultCount() || ! onPreview)
         return;
-    
-    currentIndex--;
-    if (currentIndex < 0)
-        currentIndex = static_cast<int>(soundResults.size()) - 1;  // Wrap to last
-    
-    updateDisplay();
+    const auto& sound = soundResults[(size_t) row];
+    listBox.selectRow (row);
+
+    if (previewingId == sound.id)
+    {
+        onPreview (sound, false);
+        setPreviewing (-1);
+        return;
+    }
+    onPreview (sound, true);
 }
 
-void SoundRecommendationsComponent::handleNextClicked()
+void SoundRecommendationsComponent::importClicked (int row)
 {
-    if (soundResults.empty())
+    if (row < 0 || row >= getResultCount() || ! onImport)
         return;
-    
-    currentIndex++;
-    if (currentIndex >= static_cast<int>(soundResults.size()))
-        currentIndex = 0;  // Wrap to first
-    
-    updateDisplay();
+    listBox.selectRow (row);
+    auto sound = soundResults[(size_t) row];
+    auto it = downloadedSounds.find (sound.id);
+    if (it != downloadedSounds.end())
+        sound.localPath = it->second;
+    juce::Logger::writeToLog ("[SoundRec] Import: ID=" + juce::String (sound.id) + ", " + sound.description);
+    onImport (sound);
 }
 
-void SoundRecommendationsComponent::handleDownloadClicked()
+//==============================================================================
+void SoundRecommendationsComponent::markSoundAsDownloaded (int soundId, const juce::String& localPath)
 {
-    juce::Logger::writeToLog ("[SoundRec] Download button clicked");
-    
-    auto* sound = getCurrentSound();
-    if (!sound)
-    {
-        juce::Logger::writeToLog ("[SoundRec] ERROR: No current sound");
-        return;
-    }
-    
-    juce::Logger::writeToLog ("[SoundRec] Current sound: ID=" + juce::String (sound->id) + ", " + sound->description);
-    
-    if (!onDownload)
-    {
-        juce::Logger::writeToLog ("[SoundRec] ERROR: onDownload callback is not set!");
-        return;
-    }
-    
-    juce::Logger::writeToLog ("[SoundRec] Calling onDownload callback...");
-    onDownload (*sound);
-}
-
-void SoundRecommendationsComponent::handleImportClicked()
-{
-    juce::Logger::writeToLog ("[SoundRec] Import button clicked");
-    
-    auto* sound = getCurrentSound();
-    if (!sound)
-    {
-        juce::Logger::writeToLog ("[SoundRec] ERROR: No current sound");
-        return;
-    }
-    
-    juce::Logger::writeToLog ("[SoundRec] Current sound: ID=" + juce::String (sound->id) + ", " + sound->description);
-    
-    if (!onImport)
-    {
-        juce::Logger::writeToLog ("[SoundRec] ERROR: onImport callback is not set!");
-        return;
-    }
-    
-    juce::Logger::writeToLog ("[SoundRec] Calling onImport callback...");
-    onImport (*sound);
-}
-
-void SoundRecommendationsComponent::updateDisplay()
-{
-    if (soundResults.empty())
-    {
-        headerLabel.setText (juce::CharPointer_UTF8 ("\xf0\x9f\x8e\xb5 Database Recommendations [0/0]"), juce::dontSendNotification);
-        soundNameLabel.setText ("No results", juce::dontSendNotification);
-        
-        prevButton.setEnabled (false);
-        nextButton.setEnabled (false);
-        downloadButton.setEnabled (false);
-        importButton.setEnabled (false);
-    }
-    else
-    {
-        // Update header with current position
-        juce::String headerText = juce::CharPointer_UTF8 ("\xf0\x9f\x8e\xb5 Database Recommendations [");
-        headerText << (currentIndex + 1) << "/" << soundResults.size() << "]";
-        headerLabel.setText (headerText, juce::dontSendNotification);
-        
-        // Update sound name
-        auto& currentSound = soundResults[currentIndex];
-        juce::String displayText = juce::CharPointer_UTF8 ("\xf0\x9f\x94\x8a ");  // 🔊
-        displayText << currentSound.description;
-        soundNameLabel.setText (displayText, juce::dontSendNotification);
-        
-        // Enable navigation buttons
-        prevButton.setEnabled (true);
-        nextButton.setEnabled (true);
-        
-        // Check if current sound is downloaded or downloading
-        bool isDownloaded = downloadedSounds.find(currentSound.id) != downloadedSounds.end();
-        bool isDownloading = downloadingSounds.find(currentSound.id) != downloadingSounds.end();
-        
-        // Download button state
-        if (isDownloaded)
-        {
-            downloadButton.setEnabled (false);
-            downloadButton.setButtonText (juce::CharPointer_UTF8 ("\xe2\x9c\x93 Downloaded"));  // ✓ Downloaded
-        }
-        else if (isDownloading)
-        {
-            downloadButton.setEnabled (false);
-            downloadButton.setButtonText (juce::CharPointer_UTF8 ("\xe2\x8f\xb3 Downloading..."));  // ⏳ Downloading...
-        }
-        else
-        {
-            downloadButton.setEnabled (true);
-            downloadButton.setButtonText (juce::CharPointer_UTF8 ("\xe2\xac\x87 Download"));  // ⬇ Download
-        }
-        
-        // Import button: only enabled if downloaded
-        importButton.setEnabled (isDownloaded);
-    }
-}
-
-void SoundRecommendationsComponent::markSoundAsDownloaded(int soundId, const juce::String& localPath)
-{
-    juce::Logger::writeToLog ("[SoundRec] Marking sound as downloaded: ID=" + juce::String(soundId) + ", path=" + localPath);
-    
     downloadedSounds[soundId] = localPath;
-    downloadingSounds.erase(soundId);  // Remove from downloading set
-    
-    // Update the localPath in the current sound result if it matches
+    downloadingSounds.erase (soundId);
     for (auto& sound : soundResults)
-    {
         if (sound.id == soundId)
-        {
             sound.localPath = localPath;
-            break;
-        }
-    }
-    
-    // Update UI to reflect new state
-    updateDisplay();
+    refreshRows();
 }
 
-void SoundRecommendationsComponent::markSoundAsDownloading(int soundId)
+void SoundRecommendationsComponent::markSoundAsDownloading (int soundId)
 {
-    juce::Logger::writeToLog ("[SoundRec] Marking sound as downloading: ID=" + juce::String(soundId));
-    
-    downloadingSounds.insert(soundId);
-    
-    // Update UI to reflect new state
-    updateDisplay();
+    downloadingSounds.insert (soundId);
+    refreshRows();
 }
 
-void SoundRecommendationsComponent::clearDownloadingState(int soundId)
+void SoundRecommendationsComponent::clearDownloadingState (int soundId)
 {
-    juce::Logger::writeToLog ("[SoundRec] Clearing downloading state: ID=" + juce::String(soundId));
-    
-    downloadingSounds.erase(soundId);
-    
-    // Update UI to reflect new state (button will be re-enabled)
-    updateDisplay();
+    downloadingSounds.erase (soundId);
+    refreshRows();
 }
 
+void SoundRecommendationsComponent::setPreviewLoading (int soundId)
+{
+    loadingPreviewId = soundId;
+    refreshRows();
+}
+
+void SoundRecommendationsComponent::setPreviewing (int soundId)
+{
+    loadingPreviewId = -1;
+    previewingId = soundId;
+    if (previewingId != -1)
+        startTimer (200);      // notice when the file has played to its end
+    else
+        stopTimer();
+    refreshRows();
+}
+
+void SoundRecommendationsComponent::timerCallback()
+{
+    if (previewingId != -1 && isPreviewPlaying && ! isPreviewPlaying())
+        setPreviewing (-1);
+}
