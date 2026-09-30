@@ -91,8 +91,9 @@ cd python-windows
     imageio-ffmpeg>=0.5.0 `
     psycopg2-binary>=2.9.0
 
-# Install py-ptsl (editable mode for development)
-.\python.exe -m pip install -e ..\..\..\external\py-ptsl
+# Install py-ptsl as a real copy of the pinned submodule (not editable: that would only
+# leave a path link to this checkout, and the plugin would fail on any other machine)
+.\python.exe -m pip install ..\..\..\external\py-ptsl
 ```
 
 ---
@@ -153,8 +154,9 @@ cd python-macos
     imageio-ffmpeg>=0.5.0 \
     psycopg2-binary>=2.9.0
 
-# Install py-ptsl (editable mode for development)
-./bin/python3 -m pip install -e ../../../external/py-ptsl
+# Install py-ptsl as a real copy of the pinned submodule (not editable: that would only
+# leave a path link to this checkout, and the plugin would fail on any other machine)
+./bin/python3 -m pip install ../../../external/py-ptsl
 ```
 
 ---

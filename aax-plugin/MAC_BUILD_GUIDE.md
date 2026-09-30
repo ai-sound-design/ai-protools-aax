@@ -95,8 +95,9 @@ bin/python3 -m pip install \
     grpcio \
     psycopg2-binary
 
-# Install py-ptsl (for Pro Tools integration)
-bin/python3 -m pip install --no-cache-dir git+https://github.com/iluvcapra/py-ptsl.git
+# Install py-ptsl (for Pro Tools integration): the pinned submodule, as a real copy
+git -C ../../.. submodule update --init external/py-ptsl
+bin/python3 -m pip install --no-cache-dir ../../../external/py-ptsl
 
 # Verify installation
 bin/python3 -c "import httpx, soundfile, torch; print('✓ All packages installed')"
