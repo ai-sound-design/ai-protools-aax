@@ -392,6 +392,10 @@ std::vector<PtV2AProcessor::AdapterProfile> PtV2AProcessor::getAdapterProfiles()
             p.layers = juce::jlimit (1, 10, (int) match->getProperty ("layers"));
             if (match->hasProperty ("min_similarity"))
                 p.minSimilarity = juce::jlimit (0.0, 1.0, (double) match->getProperty ("min_similarity"));
+            if (match->hasProperty ("ambience_handle_seconds"))
+                p.ambienceHandleSeconds = juce::jlimit (0.0, 120.0, (double) match->getProperty ("ambience_handle_seconds"));
+            if (match->hasProperty ("tracks_per_scene"))
+                p.tracksPerScene = juce::jlimit (1, 64, (int) match->getProperty ("tracks_per_scene"));
         }
         if (p.name.isEmpty() || ! (p.kind == "generation" || p.kind == "search" || p.kind == "spotting" || p.kind == "hybrid"))
             continue;
@@ -462,7 +466,8 @@ bool PtV2AProcessor::saveAdapterDuration (const juce::String& file, double minSe
     return target.replaceWithText (juce::JSON::toString (json, false));
 }
 
-bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity)
+bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity,
+                                       double ambienceHandleSeconds, int tracksPerScene)
 {
     auto target = getAdapterDir().getChildFile (file);
     auto json = juce::JSON::parse (target.loadFileAsString());
@@ -478,6 +483,8 @@ bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10
     block->setProperty ("pieces_per_10s", piecesPer10s);
     block->setProperty ("layers", layers);
     block->setProperty ("min_similarity", minSimilarity);
+    block->setProperty ("ambience_handle_seconds", ambienceHandleSeconds);
+    block->setProperty ("tracks_per_scene", tracksPerScene);
     return target.replaceWithText (juce::JSON::toString (json, false));
 }
 

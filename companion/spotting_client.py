@@ -32,7 +32,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -41,7 +41,7 @@ from api.config import get_api_url, get_cf_headers  # noqa: E402
 DEFAULT_SPOTTING_URL = get_api_url("spotting") or "http://localhost:8003"
 
 # Pro Tools marker colours (colour palette indices), one per event category.
-CATEGORY_COLOURS = {"dialogue": 3, "foley": 8, "sfx": 9, "ambience": 12, "music": 5, "clip": 1}
+CATEGORY_COLOURS = {"dialogue": 3, "foley": 8, "sfx": 9, "ambience": 12, "music": 5, "clip": 1, "scene": 2}
 
 # The backend samples 2 frames/s and shows the model 8 frames per call. A clip
 # shorter than 4 s would give it fewer frames, so the rate is raised until the
@@ -82,23 +82,54 @@ def log(message: str) -> None:
 
 
 class Progress:
-    """Writes the progress document the plugin polls; a no-op without a path."""
+    """Writes the progress document the plugin polls; a no-op without a path.
+
+    A heartbeat thread rewrites the document every few seconds with a fresh
+    `alive` timestamp, so the plugin can tell a slow stage (a long placement, a
+    cold backend) from a dead script and does not have to guess a time limit."""
+
+    HEARTBEAT_SECONDS = 5.0
 
     def __init__(self, path: Optional[Path]):
+        import threading
+
         self.path = path
+        self.doc: dict = {}
+        self.finished = False
+        self.lock = threading.Lock()
+        if path is not None:
+            threading.Thread(target=self._heartbeat, name="progress-heartbeat", daemon=True).start()
+
+    def _heartbeat(self) -> None:
+        import time
+
+        while not self.finished:
+            time.sleep(self.HEARTBEAT_SECONDS)
+            with self.lock:
+                if self.doc and not self.finished:
+                    self._write({**self.doc, "alive": time.time()})
 
     def update(self, current: int, total: int, clip: str, stage: str, done: bool = False,
-               fraction: Optional[float] = None, detail: str = "") -> None:
+               fraction: Optional[float] = None, detail: str = "", eta_seconds: Optional[float] = None) -> None:
         """Best effort: progress must never abort the run itself.
 
         `fraction` (0..1) is how far the backend is with the current clip, when it
-        says; `detail` its own words for that ("frames 16 of 40")."""
+        says; `detail` its own words for that ("frames 16 of 40"); `eta_seconds` a
+        rough time left, when the script can tell."""
         if self.path is None:
             return
         import time
 
-        doc = json.dumps({"current": current, "total": total, "clip": clip, "stage": stage, "done": done,
-                          "fraction": fraction, "detail": detail})
+        with self.lock:
+            self.doc = {"current": current, "total": total, "clip": clip, "stage": stage, "done": done,
+                        "fraction": fraction, "detail": detail, "eta_seconds": eta_seconds, "alive": time.time()}
+            self.finished = done
+            self._write(self.doc)
+
+    def _write(self, document: dict) -> None:
+        import time
+
+        doc = json.dumps(document)
         tmp = self.path.with_suffix(".tmp")
         for attempt in range(5):
             try:
@@ -257,14 +288,89 @@ def clip_marker(seg: Dict, index: int, total: int, clip: str) -> dict:
             "start_seconds": seg["in_seconds"], "end_seconds": seg["out_seconds"]}
 
 
+def detect_scenes(clips: List[Tuple[Path, str]], url: str, on_progress=None) -> dict:
+    """Ask the spotting service which consecutive clips (path, name; timeline order) form
+    one scene. Returns its JSON: "scenes" [{index, name, description, first_clip,
+    last_clip}] and "clip_scenes" (scene index per clip)."""
+    import uuid
+
+    import httpx
+
+    from api.adapters import ProgressPolling
+
+    job_id = uuid.uuid4().hex
+    handles = [path.open("rb") for path, _ in clips]
+    try:
+        files = [("videos", (path.name, handle, "video/mp4")) for (path, _), handle in zip(clips, handles)]
+        data = {"names": json.dumps([name for _, name in clips], ensure_ascii=False), "job_id": job_id}
+        log(f"Scenes: {len(clips)} clip(s) via {url} ...")
+        with ProgressPolling(f"{url.rstrip('/')}/spot/progress/{job_id}", on_progress):
+            response = httpx.post(f"{url.rstrip('/')}/scenes", files=files, data=data,
+                                  headers=get_cf_headers(), timeout=900)
+    finally:
+        for handle in handles:
+            handle.close()
+    if response.status_code != 200:
+        raise RuntimeError(f"spotting service returned {response.status_code}: {response.text[:400]}")
+    return response.json()
+
+
+def scene_markers(scenes: List[dict], segments: List[Dict]) -> List[dict]:
+    """One memory location per scene, spanning its clips ("Scene 2: kitchen, night")."""
+    out = []
+    for scene in scenes:
+        try:
+            first, last = segments[int(scene["first_clip"])], segments[int(scene["last_clip"])]
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        clips = int(scene["last_clip"]) - int(scene["first_clip"]) + 1
+        out.append({"label": f"Scene {scene.get('index')}: {scene.get('name', '')}"[:31], "category": "scene",
+                    "confidence": 1.0, "clip": "", "scene": scene.get("index"),
+                    "description": scene.get("description", ""),
+                    "comment": (f"Scene {scene.get('index')}: {scene.get('name', '')}. {scene.get('description', '')} "
+                                f"({clips} clip{'s' if clips != 1 else ''})"),
+                    "start_timecode": first["in_time"], "end_timecode": last["out_time"],
+                    "start_seconds": first["in_seconds"], "end_seconds": last["out_seconds"]})
+    return out
+
+
+def cut_segments(segments: List[Dict], progress: Progress) -> Dict[int, Path]:
+    """Cut every segment out of its source video; {segment index: temp file}."""
+    cuts: Dict[int, Path] = {}
+    total = len(segments)
+    for i, seg in enumerate(segments, start=1):
+        progress.update(i, total, seg.get("clip_name") or Path(seg["video_path"]).stem, "cutting")
+        cuts[seg["index"]] = cut_range(Path(seg["video_path"]), seg["source_start_seconds"], seg["source_end_seconds"])
+    return cuts
+
+
 def run_segments(segments: List[Dict], fps: float, args, progress: Progress,
                  engine_factory: Callable) -> dict:
     """Spot every segment in timeline order, then place all markers in one PTSL session."""
     total = len(segments)
     all_events: List[dict] = []
     clip_markers: List[dict] = []
+    scene_marks: List[dict] = []
+    scenes: List[dict] = []
     per_clip: List[dict] = []
     model = None
+    cuts: Dict[int, Path] = {}
+    if getattr(args, "scenes", False):
+        # Scenes first: the backend sees every clip of the range at once, and the
+        # cut files are reused for the spotting below.
+        cuts = cut_segments(segments, progress)
+        try:
+            progress.update(0, total, "", "detecting scenes")
+            found = detect_scenes([(cuts[s["index"]], s.get("clip_name") or Path(s["video_path"]).stem)
+                                   for s in segments], args.url,
+                                  on_progress=lambda p: progress.update(0, total, "", "detecting scenes",
+                                                                        fraction=p.get("fraction"),
+                                                                        detail=p.get("detail", "")))
+            scenes = found.get("scenes", [])
+            scene_marks = scene_markers(scenes, segments)
+            log(f"{len(scenes)} scene(s): " + "; ".join(f"{s.get('index')}: {s.get('name')}" for s in scenes))
+        except Exception as exc:  # noqa: BLE001  (scenes are a courtesy; the spotting still runs)
+            log(f"scene detection failed: {exc}")
     for i, seg in enumerate(segments, start=1):
         clip = seg.get("clip_name") or Path(seg["video_path"]).stem
         if not args.no_clip_markers:
@@ -277,14 +383,24 @@ def run_segments(segments: List[Dict], fps: float, args, progress: Progress,
         log(f"[{i}/{total}] {clip} {seg['in_time']}-{seg['out_time']}")
         try:
             progress.update(i, total, clip, "spotting")
-            result = spot_segment(Path(seg["video_path"]), seg["source_start_seconds"], seg["source_end_seconds"],
-                                  seg["in_time"], fps, args.url, args.hints,
-                                  on_progress=lambda p, i=i, clip=clip: progress.update(
-                                      i, total, clip, "spotting", fraction=p.get("fraction"), detail=p.get("detail", "")))
+
+            def report(p, i=i, clip=clip):
+                progress.update(i, total, clip, "spotting", fraction=p.get("fraction"), detail=p.get("detail", ""))
+
+            if seg["index"] in cuts:
+                result = spot_video(cuts[seg["index"]], seg["in_time"], fps, args.url, args.hints,
+                                    seg["duration_seconds"], report)
+            else:
+                result = spot_segment(Path(seg["video_path"]), seg["source_start_seconds"],
+                                      seg["source_end_seconds"], seg["in_time"], fps, args.url, args.hints,
+                                      on_progress=report)
         except Exception as exc:  # one failing clip must not lose the others
             log(f"[{i}/{total}] {clip} failed: {exc}")
             per_clip.append({"clip": clip, "in_time": seg["in_time"], "events": 0, "error": str(exc)})
             continue
+        finally:
+            if seg["index"] in cuts:
+                cuts.pop(seg["index"]).unlink(missing_ok=True)
         events = result.get("events", [])
         for event in events:
             event["clip"] = clip
@@ -305,9 +421,11 @@ def run_segments(segments: List[Dict], fps: float, args, progress: Progress,
                                         f"{total} clip(s)",
                              "start_timecode": last["out_time"], "end_timecode": last["out_time"],
                              "start_seconds": last["out_seconds"], "end_seconds": last["out_seconds"]})
+    for path in cuts.values():
+        path.unlink(missing_ok=True)
     output = {"success": True, "events": all_events, "model": model, "clips": per_clip, "segments": total,
-              "clip_markers": len(clip_markers)}
-    markers = clip_markers + all_events
+              "clip_markers": len(clip_markers), "scenes": scenes, "scene_markers": len(scene_marks)}
+    markers = scene_marks + clip_markers + all_events
     if not args.dry_run and markers:
         progress.update(total, total, "", "placing markers")
         with engine_factory() as engine:
@@ -334,6 +452,8 @@ def main() -> int:
     parser.add_argument("--clip-start", type=float, help="--video: cut the video from this second (source time) ...")
     parser.add_argument("--clip-end", type=float, help="... to this second before spotting")
     parser.add_argument("--hints", help="free-text context for the model")
+    parser.add_argument("--scenes", action="store_true",
+                        help="group the clips of the range into scenes first and place one memory location per scene")
     parser.add_argument("--no-clip-markers", action="store_true",
                         help="do not add one marker per video clip (clip boundaries)")
     parser.add_argument("--ruler", help="named marker ruler to use, e.g. 'Foley and SFX'; main ruler if absent")

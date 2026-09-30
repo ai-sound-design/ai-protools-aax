@@ -29,6 +29,8 @@ struct AdapterProfile
     int piecesPer10s = 3;
     int layers = 1;
     double minSimilarity = 0.5;   ///< pieces below it are not placed
+    double ambienceHandleSeconds = 10.0;   ///< an ambience piece keeps this much of its recording before and after
+    int tracksPerScene = 8;                ///< the sounds of a scene share at most this many tracks
 
     bool isValid() const noexcept { return file.isNotEmpty(); }
     bool supportsFeature (const juce::String& feature) const { return supports.contains (feature); }

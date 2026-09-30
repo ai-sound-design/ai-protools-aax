@@ -116,10 +116,14 @@ private:
     juce::ToggleButton useMemoryLocationsToggle { "Use existing memory locations" };
     /** Hybrid only: when a clip in the range has no memory locations, let the backend spot it (else skip it). */
     juce::ToggleButton autoSpotToggle { "Spot the range automatically when it has none" };
-    /** Hybrid only: library recordings that sound like each generated sound, on a track underneath ... */
+    /** Hybrid only: library recordings that sound like each generated sound, instead of it ... */
     juce::ToggleButton useDatabaseSoundsToggle { "Use database sounds" };
-    /** ... or instead of the generated sound. */
-    juce::ToggleButton replaceGeneratedToggle { "Replace generated sounds" };
+    /** ... or, with this on, on tracks underneath the generated sound, which then stays. */
+    juce::ToggleButton keepGeneratedToggle { "Keep generated sounds" };
+    /** Hybrid only: ambience pieces keep the seconds set in Settings before and after for fades (off: hard cut). */
+    juce::ToggleButton ambienceHandlesToggle { "Keep ambience handles" };
+    /** Spotting and Hybrid: group the clips of the range into scenes first, one memory location per scene. */
+    juce::ToggleButton detectScenesToggle { "Detect scenes" };
     /** What the hybrid backend's health says about library matches (search service up, audio index present). */
     bool hybridMatchAvailable = true;
     juce::String hybridMatchReason;
@@ -149,6 +153,8 @@ private:
 
     /** Spotting only: run over every clip of the video track instead of the selection. */
     juce::TextButton spotWholeTrackButton { "Spot Entire Track..." };
+    /** Hybrid only: the whole video track, after an estimate of how long that takes. */
+    juce::TextButton hybridWholeTrackButton { "Run on entire track..." };
 
     /** Progress of a running multi-clip operation; hidden while idle. */
     double progressValue = 0.0;                 // declared before progressBar, which binds to it
@@ -365,7 +371,11 @@ private:
     void handleAutoSpottingButtonClicked();
     void handleHybridButtonClicked();
     /** Start hybrid_client.py over the selection: one generated sound per event, each on its own track. */
-    void startHybrid();
+    /** Start hybrid_client.py over the selection or the whole track; `resume` continues the journal of an
+        earlier run over the same range; `estimate` only counts clips and answers with a duration estimate. */
+    void startHybrid (bool wholeTrack, bool resume, bool estimate = false);
+    /** Kill the running spotting/hybrid script; what it placed so far stays. */
+    void stopRun();
 
     /** Start spotting_client.py over the selection or, with wholeTrack, over the whole video track. */
     void startSpotting (bool wholeTrack);
@@ -588,7 +598,8 @@ private:
         ImportingAudio,                    // Importing generated audio to Pro Tools via PTSL
         ImportingSoundFX,                  // Importing sound library audio to Pro Tools via PTSL
         SpottingAnalysis,                  // spotting_client.py: selection -> clips -> backend -> markers
-        HybridGeneration                   // hybrid_client.py: selection -> clips -> backend -> one track per sound
+        HybridGeneration,                  // hybrid_client.py: selection -> clips -> backend -> tracks per scene
+        HybridEstimate                     // hybrid_client.py --estimate: clip count and duration before a long run
 };
     
     AsyncState currentAsyncState = AsyncState::Idle;
@@ -628,6 +639,10 @@ private:
     juce::Time asyncOperationStartTime;
     /** Last sign of life from a multi-clip script (progress file changed); the timeout counts from here */
     juce::Time lastProgressTime;
+    /** The "no sign of life" dialog is open (spotting/hybrid): do not ask twice. */
+    bool staleDialogOpen = false;
+    /** The user stopped the running script: report where it was instead of a failure. */
+    bool runStopped = false;
     
     /** Expected output file path (for audio generation polling) */
     juce::String expectedAudioOutputPath;

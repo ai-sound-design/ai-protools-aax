@@ -289,7 +289,8 @@ static const juce::String DEFAULT_NEGATIVE_PROMPT;         ///< Default sounds t
 
     /** Write a hybrid backend's library-match settings ("match": {pieces_per_10s, layers}) into its profile file,
         keeping the block's other keys. */
-    bool saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity);
+    bool saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity,
+                           double ambienceHandleSeconds, int tracksPerScene);
 
     BackendSettings getBackendSettings();
     bool saveBackendSettings (const BackendSettings& settings);
