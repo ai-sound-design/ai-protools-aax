@@ -129,7 +129,7 @@ int SettingsPanel::preferredHeight() const
     int rowsHeight = 0;
     for (const auto& row : rows)
         rowsHeight += rowHeight + gap + (row->hasSubRow() ? lengthRowHeight + gap : 0)
-                      + (row->hasMatch() ? lengthRowHeight + gap : 0);   // hybrid: a second sub-row
+                      + (row->hasMatch() ? 2 * (lengthRowHeight + gap) : 0);   // hybrid: a second and third sub-row
     rowsHeight = juce::jmax (rowHeight + gap, rowsHeight);
     return 2 * margin + 44 + gap + rowsHeight + rowHeight + 20 + 3 * gap      // intro, rows, folder buttons + hint
          + rowHeight + gap + 2 * (rowHeight + gap) + 20 + 2 * gap             // tunnel toggle, id, secret, hint
@@ -187,7 +187,7 @@ void SettingsPanel::rebuildRows()
         if (row->hasMatch())
         {
             for (auto* label : { &row->piecesLabel, &row->layersLabel, &row->similarityLabel, &row->handleLabel,
-                                 &row->tracksLabel })
+                                 &row->tracksLabel, &row->fadeLabel, &row->fadeSecondsLabel })
             {
                 label->setFont (juce::Font (13.0f));
                 label->setJustificationType (juce::Justification::centredRight);
@@ -209,9 +209,23 @@ void SettingsPanel::rebuildRows()
             row->minSimilarity.setInputRestrictions (4, "0123456789.");
             row->handleSeconds.setInputRestrictions (3, "0123456789");
             row->handleLabel.setTooltip ("Use database sounds: an ambience piece keeps this many seconds of its "
-                                         "recording before and after the matched stretch, so it can be faded in "
-                                         "and out. The Hybrid switch \"Keep ambience handles\" turns this off for "
-                                         "one run (hard cut).");
+                                         "recording before and after the event in its file; the clip is trimmed to "
+                                         "the event, so the handles can be pulled out with the Trim tool. The Hybrid "
+                                         "switch \"Keep ambience handles\" turns this off for one run (hard cut).");
+            row->fadePreset.setText (profile.fadePreset, false);
+            row->fadePreset.setFont (juce::Font (13.0f));
+            row->fadeLabel.setTooltip ("Auto fade: the Pro Tools batch-fades preset (a range across a clip's edges, "
+                                       "Edit > Fades > Create..., tick create new fade ins and outs, Save Settings As... "
+                                       "under this name) that gives an ambience clip its fade-in and fade-out. "
+                                       "A preset Pro Tools does not know leaves the clip without fades.");
+            addAndMakeVisible (row->fadePreset);
+            setUpNumberEditor (row->fadeSeconds, profile.fadeSeconds);
+            row->fadeSeconds.setInputRestrictions (4, "0123456789.");
+            row->fadeSecondsLabel.setTooltip ("Auto fade: the clip keeps this much of its handle outside the event on "
+                                              "each side, and the fade runs over that stretch, so the sound is at full "
+                                              "level at the event's edges. Give the preset's fade-in and fade-out the "
+                                              "same length.");
+            addAndMakeVisible (row->fadeSeconds);
             row->piecesLabel.setTooltip ("Use database sounds: at most this many library pieces per ten seconds "
                                          "of a generated sound; a recording that fits the whole sound is kept whole "
                                          "(1 = never cut). Max db tracks: how many tracks of library sounds one event "
@@ -360,12 +374,16 @@ void SettingsPanel::save()
             const double similarity = juce::jlimit (0.0, 1.0, row->minSimilarity.getText().getDoubleValue());
             const double handles = juce::jlimit (0.0, 120.0, row->handleSeconds.getText().getDoubleValue());
             const int tracks = juce::jlimit (1, 64, row->tracksPerScene.getText().getIntValue());
+            const juce::String preset = row->fadePreset.getText().trim();
+            const double fadeSecs = juce::jlimit (0.0, 30.0, row->fadeSeconds.getText().getDoubleValue());
             if (pieces == row->profile.piecesPer10s && layers == row->profile.layers
                 && std::abs (similarity - row->profile.minSimilarity) < 0.001
                 && std::abs (handles - row->profile.ambienceHandleSeconds) < 0.001
-                && tracks == row->profile.tracksPerScene)
+                && tracks == row->profile.tracksPerScene && preset == row->profile.fadePreset
+                && std::abs (fadeSecs - row->profile.fadeSeconds) < 0.001)
                 continue;
-            if (! processor.saveAdapterMatch (row->profile.file, pieces, layers, similarity, handles, tracks))
+            if (! processor.saveAdapterMatch (row->profile.file, pieces, layers, similarity, handles, tracks, preset,
+                                              fadeSecs))
                 juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Save Failed",
                                                         "Could not update the adapter profile " + row->profile.file, "OK");
         }
@@ -451,6 +469,14 @@ void SettingsPanel::resized()
             row->tracksLabel.setBounds (sub2.removeFromLeft (120));
             sub2.removeFromLeft (gap);
             row->tracksPerScene.setBounds (sub2.removeFromLeft (36));
+            area.removeFromTop (gap);
+            auto sub3 = area.removeFromTop (lengthRowHeight).withTrimmedLeft (nameWidth);
+            row->fadeLabel.setBounds (sub3.removeFromLeft (110));
+            sub3.removeFromLeft (gap);
+            row->fadePreset.setBounds (sub3.removeFromLeft (160));
+            row->fadeSecondsLabel.setBounds (sub3.removeFromLeft (70));
+            sub3.removeFromLeft (gap);
+            row->fadeSeconds.setBounds (sub3.removeFromLeft (44));
             area.removeFromTop (gap);
         }
     }

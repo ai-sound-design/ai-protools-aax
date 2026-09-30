@@ -110,19 +110,23 @@ class Progress:
                     self._write({**self.doc, "alive": time.time()})
 
     def update(self, current: int, total: int, clip: str, stage: str, done: bool = False,
-               fraction: Optional[float] = None, detail: str = "", eta_seconds: Optional[float] = None) -> None:
+               fraction: Optional[float] = None, detail: str = "", eta_seconds: Optional[float] = None,
+               overall: Optional[float] = None) -> None:
         """Best effort: progress must never abort the run itself.
 
         `fraction` (0..1) is how far the backend is with the current clip, when it
         says; `detail` its own words for that ("frames 16 of 40"); `eta_seconds` a
-        rough time left, when the script can tell."""
+        rough time left, when the script can tell; `overall` (0..1) the share of the
+        whole run that is done (see RunShare), which the plugin's bar follows when
+        it is given, instead of counting clips."""
         if self.path is None:
             return
         import time
 
         with self.lock:
             self.doc = {"current": current, "total": total, "clip": clip, "stage": stage, "done": done,
-                        "fraction": fraction, "detail": detail, "eta_seconds": eta_seconds, "alive": time.time()}
+                        "fraction": fraction, "detail": detail, "eta_seconds": eta_seconds, "overall": overall,
+                        "alive": time.time()}
             self.finished = done
             self._write(self.doc)
 
@@ -334,12 +338,62 @@ def scene_markers(scenes: List[dict], segments: List[Dict]) -> List[dict]:
     return out
 
 
-def cut_segments(segments: List[Dict], progress: Progress) -> Dict[int, Path]:
-    """Cut every segment out of its source video; {segment index: temp file}."""
+EVENT_CATEGORIES = ("dialogue", "foley", "sfx", "ambience", "music")
+CATEGORY_WORDS = {"dialogue": "dialogue (human speech)",
+                  "foley": "foley (footsteps, clothes, objects handled by people)",
+                  "sfx": "sound effects (machines, vehicles, animals, impacts, weather)",
+                  "ambience": "ambience (the room tone or atmosphere of the place)",
+                  "music": "music with a visible source"}
+
+
+def category_hint(categories: List[str], hints: str | None) -> str | None:
+    """The editor's hint to the model, extended by which kinds of sound are wanted."""
+    wanted = [c for c in EVENT_CATEGORIES if c in categories]
+    if not wanted or len(wanted) == len(EVENT_CATEGORIES):
+        return hints
+    text = "Only these kinds of sound are needed: " + "; ".join(CATEGORY_WORDS[c] for c in wanted) + "."
+    return f"{hints.strip()} {text}" if hints and hints.strip() else text
+
+
+def keep_categories(events: List[dict], categories: List[str]) -> List[dict]:
+    if not categories:
+        return events
+    return [e for e in events if e.get("category") in categories]
+
+
+class RunShare:
+    """The share of a whole run that is done, for the plugin's progress bar.
+
+    Every clip counts one unit for its spotting or generation; detecting the scenes
+    counts half a unit per clip beforehand (one whole unit per clip when scenes are
+    all the run does); placing the sounds afterwards `placing` units per clip."""
+
+    def __init__(self, clips: int, scenes: bool, events: bool, placing: float = 0.0):
+        clips = max(1, clips)
+        self.scene_units = (0.5 * clips if events else float(clips)) if scenes else 0.0
+        self.clip_units = float(clips) if events else 0.0
+        self.place_units = placing * clips if events else 0.0
+        self.units = max(self.scene_units + self.clip_units + self.place_units, 1e-9)
+
+    def scenes(self, fraction: Optional[float]) -> float:
+        return self.scene_units * max(0.0, min(1.0, fraction or 0.0)) / self.units
+
+    def clip(self, i: int, fraction: Optional[float] = 0.0) -> float:
+        """Clip `i` (1-based) is in progress, `fraction` of it done."""
+        return (self.scene_units + max(0, i - 1) + max(0.0, min(1.0, fraction or 0.0))) / self.units
+
+    def placing(self, fraction: float) -> float:
+        return (self.scene_units + self.clip_units + self.place_units * max(0.0, min(1.0, fraction))) / self.units
+
+
+def cut_segments(segments: List[Dict], progress: Progress, overall_of=None) -> Dict[int, Path]:
+    """Cut every segment out of its source video; {segment index: temp file}.
+    `overall_of(i)` names the run's share done after cutting clip i, when known."""
     cuts: Dict[int, Path] = {}
     total = len(segments)
     for i, seg in enumerate(segments, start=1):
-        progress.update(i, total, seg.get("clip_name") or Path(seg["video_path"]).stem, "cutting")
+        progress.update(i, total, seg.get("clip_name") or Path(seg["video_path"]).stem, "cutting",
+                        overall=overall_of(i) if overall_of else None)
         cuts[seg["index"]] = cut_range(Path(seg["video_path"]), seg["source_start_seconds"], seg["source_end_seconds"])
     return cuts
 
@@ -355,44 +409,52 @@ def run_segments(segments: List[Dict], fps: float, args, progress: Progress,
     per_clip: List[dict] = []
     model = None
     cuts: Dict[int, Path] = {}
+    share = RunShare(total, scenes=bool(getattr(args, "scenes", False)), events=not getattr(args, "no_events", False))
     if getattr(args, "scenes", False):
         # Scenes first: the backend sees every clip of the range at once, and the
         # cut files are reused for the spotting below.
-        cuts = cut_segments(segments, progress)
+        cuts = cut_segments(segments, progress, overall_of=lambda i: share.scenes(0.05 * i / total))
         try:
-            progress.update(0, total, "", "detecting scenes")
+            progress.update(0, total, "", "detecting scenes", overall=share.scenes(0.05))
             found = detect_scenes([(cuts[s["index"]], s.get("clip_name") or Path(s["video_path"]).stem)
                                    for s in segments], args.url,
                                   on_progress=lambda p: progress.update(0, total, "", "detecting scenes",
                                                                         fraction=p.get("fraction"),
-                                                                        detail=p.get("detail", "")))
+                                                                        detail=p.get("detail", ""),
+                                                                        overall=share.scenes(p.get("fraction"))))
             scenes = found.get("scenes", [])
             scene_marks = scene_markers(scenes, segments)
             log(f"{len(scenes)} scene(s): " + "; ".join(f"{s.get('index')}: {s.get('name')}" for s in scenes))
         except Exception as exc:  # noqa: BLE001  (scenes are a courtesy; the spotting still runs)
             log(f"scene detection failed: {exc}")
+    categories = [c.strip().lower() for c in (getattr(args, "categories", "") or "").split(",") if c.strip()]
+    hints = category_hint(categories, args.hints)
     for i, seg in enumerate(segments, start=1):
         clip = seg.get("clip_name") or Path(seg["video_path"]).stem
         if not args.no_clip_markers:
             clip_markers.append(clip_marker(seg, i, total, clip))
+        if getattr(args, "no_events", False):
+            per_clip.append({"clip": clip, "in_time": seg["in_time"], "events": 0, "skipped": "events off"})
+            continue
         if seg["duration_seconds"] < MIN_SEGMENT_SECONDS:
             log(f"[{i}/{total}] {clip}: {seg['duration_seconds']:.2f}s is too short, skipped")
             per_clip.append({"clip": clip, "in_time": seg["in_time"], "events": 0, "skipped": "too short"})
             continue
-        progress.update(i, total, clip, "cutting")
+        progress.update(i, total, clip, "cutting", overall=share.clip(i))
         log(f"[{i}/{total}] {clip} {seg['in_time']}-{seg['out_time']}")
         try:
-            progress.update(i, total, clip, "spotting")
+            progress.update(i, total, clip, "spotting", overall=share.clip(i))
 
             def report(p, i=i, clip=clip):
-                progress.update(i, total, clip, "spotting", fraction=p.get("fraction"), detail=p.get("detail", ""))
+                progress.update(i, total, clip, "spotting", fraction=p.get("fraction"), detail=p.get("detail", ""),
+                                overall=share.clip(i, p.get("fraction")))
 
             if seg["index"] in cuts:
-                result = spot_video(cuts[seg["index"]], seg["in_time"], fps, args.url, args.hints,
+                result = spot_video(cuts[seg["index"]], seg["in_time"], fps, args.url, hints,
                                     seg["duration_seconds"], report)
             else:
                 result = spot_segment(Path(seg["video_path"]), seg["source_start_seconds"],
-                                      seg["source_end_seconds"], seg["in_time"], fps, args.url, args.hints,
+                                      seg["source_end_seconds"], seg["in_time"], fps, args.url, hints,
                                       on_progress=report)
         except Exception as exc:  # one failing clip must not lose the others
             log(f"[{i}/{total}] {clip} failed: {exc}")
@@ -401,7 +463,7 @@ def run_segments(segments: List[Dict], fps: float, args, progress: Progress,
         finally:
             if seg["index"] in cuts:
                 cuts.pop(seg["index"]).unlink(missing_ok=True)
-        events = result.get("events", [])
+        events = keep_categories(result.get("events", []), categories)
         for event in events:
             event["clip"] = clip
         all_events.extend(events)
@@ -427,12 +489,13 @@ def run_segments(segments: List[Dict], fps: float, args, progress: Progress,
               "clip_markers": len(clip_markers), "scenes": scenes, "scene_markers": len(scene_marks)}
     markers = scene_marks + clip_markers + all_events
     if not args.dry_run and markers:
-        progress.update(total, total, "", "placing markers")
+        progress.update(total, total, "", "placing markers", overall=1.0)
         with engine_factory() as engine:
             output.update(place_markers(engine, markers, fps, args.ruler))
         output["success"] = output["created"] > 0
     if not all_events:
-        output["success"] = any("error" not in c and "skipped" not in c for c in per_clip)
+        output["success"] = any("error" not in c and "skipped" not in c for c in per_clip) \
+            or (getattr(args, "no_events", False) and output.get("created", 0) > 0)
         if not output["success"]:
             output["error"] = "; ".join(c.get("error") or c.get("skipped", "") for c in per_clip) or "no events"
     progress.update(total, total, "", "done", done=True)
@@ -454,6 +517,11 @@ def main() -> int:
     parser.add_argument("--hints", help="free-text context for the model")
     parser.add_argument("--scenes", action="store_true",
                         help="group the clips of the range into scenes first and place one memory location per scene")
+    parser.add_argument("--no-events", action="store_true",
+                        help="do not look for sound events (only scenes and clip markers)")
+    parser.add_argument("--categories", default="",
+                        help="comma-separated kinds of events to keep (dialogue, foley, sfx, ambience, music); "
+                             "the model is told which kinds are wanted, and other events are dropped")
     parser.add_argument("--no-clip-markers", action="store_true",
                         help="do not add one marker per video clip (clip boundaries)")
     parser.add_argument("--ruler", help="named marker ruler to use, e.g. 'Foley and SFX'; main ruler if absent")

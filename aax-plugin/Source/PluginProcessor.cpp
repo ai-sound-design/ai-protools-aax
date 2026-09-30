@@ -396,6 +396,10 @@ std::vector<PtV2AProcessor::AdapterProfile> PtV2AProcessor::getAdapterProfiles()
                 p.ambienceHandleSeconds = juce::jlimit (0.0, 120.0, (double) match->getProperty ("ambience_handle_seconds"));
             if (match->hasProperty ("tracks_per_scene"))
                 p.tracksPerScene = juce::jlimit (1, 64, (int) match->getProperty ("tracks_per_scene"));
+            if (match->hasProperty ("fade_preset"))
+                p.fadePreset = match->getProperty ("fade_preset").toString().trim();
+            if (match->hasProperty ("fade_seconds"))
+                p.fadeSeconds = juce::jlimit (0.0, 30.0, (double) match->getProperty ("fade_seconds"));
         }
         if (p.name.isEmpty() || ! (p.kind == "generation" || p.kind == "search" || p.kind == "spotting" || p.kind == "hybrid"))
             continue;
@@ -467,7 +471,8 @@ bool PtV2AProcessor::saveAdapterDuration (const juce::String& file, double minSe
 }
 
 bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity,
-                                       double ambienceHandleSeconds, int tracksPerScene)
+                                       double ambienceHandleSeconds, int tracksPerScene, const juce::String& fadePreset,
+                                       double fadeSeconds)
 {
     auto target = getAdapterDir().getChildFile (file);
     auto json = juce::JSON::parse (target.loadFileAsString());
@@ -485,6 +490,8 @@ bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10
     block->setProperty ("min_similarity", minSimilarity);
     block->setProperty ("ambience_handle_seconds", ambienceHandleSeconds);
     block->setProperty ("tracks_per_scene", tracksPerScene);
+    block->setProperty ("fade_preset", fadePreset);
+    block->setProperty ("fade_seconds", fadeSeconds);
     return target.replaceWithText (juce::JSON::toString (json, false));
 }
 

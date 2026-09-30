@@ -112,18 +112,23 @@ private:
     juce::TextButton autoSpottingModeButton {"Spotting" };
     juce::TextButton hybridModeButton { "Hybrid" };
 
-    /** Hybrid only: send the memory locations inside the selection to the backend as the sound events. */
+    /** Hybrid only: the session's memory locations are the events and scenes; what is missing is spotted/detected. */
     juce::ToggleButton useMemoryLocationsToggle { "Use existing memory locations" };
-    /** Hybrid only: when a clip in the range has no memory locations, let the backend spot it (else skip it). */
-    juce::ToggleButton autoSpotToggle { "Spot the range automatically when it has none" };
     /** Hybrid only: library recordings that sound like each generated sound, instead of it ... */
     juce::ToggleButton useDatabaseSoundsToggle { "Use database sounds" };
     /** ... or, with this on, on tracks underneath the generated sound, which then stays. */
     juce::ToggleButton keepGeneratedToggle { "Keep generated sounds" };
     /** Hybrid only: ambience pieces keep the seconds set in Settings before and after for fades (off: hard cut). */
     juce::ToggleButton ambienceHandlesToggle { "Keep ambience handles" };
-    /** Spotting and Hybrid: group the clips of the range into scenes first, one memory location per scene. */
+    /** Hybrid only: a fade-in over the handle before and a fade-out over the handle after, written into the file. */
+    juce::ToggleButton autoFadeToggle { "Auto fade" };
+    /** Spotting: group the clips of the range into scenes first, one memory location per scene. */
     juce::ToggleButton detectScenesToggle { "Detect scenes" };
+    /** Spotting: look for sound events at all, and which kinds (the backend's categories). */
+    juce::ToggleButton detectEventsToggle { "Detect sound events" };
+    juce::Label eventKindsLabel { {}, "Events:" };
+    juce::ToggleButton dialogueToggle { "Dialogue" }, foleyToggle { "Foley" }, sfxToggle { "SFX" },
+                       ambienceToggle { "Ambience" }, musicToggle { "Music" };
     /** What the hybrid backend's health says about library matches (search service up, audio index present). */
     bool hybridMatchAvailable = true;
     juce::String hybridMatchReason;
@@ -131,13 +136,6 @@ private:
     void refreshHybridBackendHealth();
     void applyHybridMatchAvailability();
     
-    /**
-     * Small (i) next to the mode switch. Hovering shows what the current mode does;
-     * clicking shows the same text in a dialog. The mode buttons carry the same
-     * descriptions as tooltips.
-     */
-    juce::TextButton modeInfoButton { "i" };
-    void updateModeInfo();
 
     /**
      * Which backends are there: a mode whose kind has no adapter profile, or whose
@@ -145,7 +143,7 @@ private:
      * reason in its tooltip. Probed in the background when the editor opens, after
      * the settings were saved, and every 30 s after that.
      */
-    struct BackendAvailability { bool available = true; juce::String reason; };
+    struct BackendAvailability { bool available = true; bool missed = false; juce::String reason; };
     std::map<juce::String, BackendAvailability> backendAvailability;   // kind -> state
     int availabilityRequest = 0;
     void refreshBackendAvailability();
@@ -614,7 +612,7 @@ private:
     };
     
     WorkflowMode currentWorkflowMode = WorkflowMode::AudioGeneration;
-    juce::String modeDescription (WorkflowMode mode) const;   // what a mode does, for tooltips and the (i)
+    juce::String modeDescription (WorkflowMode mode) const;   // what a mode does, for the mode buttons' tooltips
     
     /** PTSL process handle (for async timeline selection and import) */
     std::unique_ptr<juce::ChildProcess> ptslProcess;
@@ -688,8 +686,8 @@ private:
     /** Current generation mode: true = T2A (text-only), false = V2A (video-to-audio) */
     bool isT2AMode = false;
     
-    /** T2A duration selected by user (4-12s) */
-    float t2aDuration = 8.0f;
+    /** T2A length in seconds; 0 = "Auto", resolved from the marked range once it is read. */
+    float t2aDuration = 0.0f;
     
     /** Timeout for PTSL calls (milliseconds) */
     static constexpr int PTSL_TIMEOUT_MS = 10000;  // 10 seconds: quick PTSL reads
