@@ -128,7 +128,8 @@ int SettingsPanel::preferredHeight() const
 {
     int rowsHeight = 0;
     for (const auto& row : rows)
-        rowsHeight += rowHeight + gap + (row->hasSubRow() ? lengthRowHeight + gap : 0);
+        rowsHeight += rowHeight + gap + (row->hasSubRow() ? lengthRowHeight + gap : 0)
+                      + (row->hasMatch() ? lengthRowHeight + gap : 0);   // hybrid: a second sub-row
     rowsHeight = juce::jmax (rowHeight + gap, rowsHeight);
     return 2 * margin + 44 + gap + rowsHeight + rowHeight + 20 + 3 * gap      // intro, rows, folder buttons + hint
          + rowHeight + gap + 2 * (rowHeight + gap) + 20 + 2 * gap             // tunnel toggle, id, secret, hint
@@ -185,7 +186,8 @@ void SettingsPanel::rebuildRows()
         }
         if (row->hasMatch())
         {
-            for (auto* label : { &row->piecesLabel, &row->layersLabel, &row->similarityLabel })
+            for (auto* label : { &row->piecesLabel, &row->layersLabel, &row->similarityLabel, &row->handleLabel,
+                                 &row->tracksLabel })
             {
                 label->setFont (juce::Font (13.0f));
                 label->setJustificationType (juce::Justification::centredRight);
@@ -195,9 +197,21 @@ void SettingsPanel::rebuildRows()
             setUpNumberEditor (row->layers, profile.layers);
             setUpNumberEditor (row->minSimilarity, profile.minSimilarity);
             row->minSimilarity.setText (juce::String (profile.minSimilarity, 2), false);
+            setUpNumberEditor (row->handleSeconds, profile.ambienceHandleSeconds);
+            setUpNumberEditor (row->tracksPerScene, profile.tracksPerScene);
+            row->tracksPerScene.setInputRestrictions (2, "0123456789");
+            row->tracksLabel.setTooltip ("Hybrid: the sounds of one scene share at most this many tracks (about eight "
+                                         "is usual). Sounds that do not overlap in time share a track; further library "
+                                         "layers are only placed where a track within the budget is free. Sounds that "
+                                         "have to be placed open more tracks if that many overlap.");
             row->pieces.setInputRestrictions (2, "0123456789");
             row->layers.setInputRestrictions (2, "0123456789");
             row->minSimilarity.setInputRestrictions (4, "0123456789.");
+            row->handleSeconds.setInputRestrictions (3, "0123456789");
+            row->handleLabel.setTooltip ("Use database sounds: an ambience piece keeps this many seconds of its "
+                                         "recording before and after the matched stretch, so it can be faded in "
+                                         "and out. The Hybrid switch \"Keep ambience handles\" turns this off for "
+                                         "one run (hard cut).");
             row->piecesLabel.setTooltip ("Use database sounds: at most this many library pieces per ten seconds "
                                          "of a generated sound; a recording that fits the whole sound is kept whole "
                                          "(1 = never cut). Max db tracks: how many tracks of library sounds one event "
@@ -207,6 +221,8 @@ void SettingsPanel::rebuildRows()
             addAndMakeVisible (row->pieces);
             addAndMakeVisible (row->layers);
             addAndMakeVisible (row->minSimilarity);
+            addAndMakeVisible (row->handleSeconds);
+            addAndMakeVisible (row->tracksPerScene);
         }
         rows.push_back (std::move (row));
     }
@@ -342,10 +358,14 @@ void SettingsPanel::save()
             const int pieces = juce::jlimit (1, 20, row->pieces.getText().getIntValue());
             const int layers = juce::jlimit (1, 10, row->layers.getText().getIntValue());
             const double similarity = juce::jlimit (0.0, 1.0, row->minSimilarity.getText().getDoubleValue());
+            const double handles = juce::jlimit (0.0, 120.0, row->handleSeconds.getText().getDoubleValue());
+            const int tracks = juce::jlimit (1, 64, row->tracksPerScene.getText().getIntValue());
             if (pieces == row->profile.piecesPer10s && layers == row->profile.layers
-                && std::abs (similarity - row->profile.minSimilarity) < 0.001)
+                && std::abs (similarity - row->profile.minSimilarity) < 0.001
+                && std::abs (handles - row->profile.ambienceHandleSeconds) < 0.001
+                && tracks == row->profile.tracksPerScene)
                 continue;
-            if (! processor.saveAdapterMatch (row->profile.file, pieces, layers, similarity))
+            if (! processor.saveAdapterMatch (row->profile.file, pieces, layers, similarity, handles, tracks))
                 juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Save Failed",
                                                         "Could not update the adapter profile " + row->profile.file, "OK");
         }
@@ -423,6 +443,14 @@ void SettingsPanel::resized()
             row->similarityLabel.setBounds (sub.removeFromLeft (96));
             sub.removeFromLeft (gap);
             row->minSimilarity.setBounds (sub.removeFromLeft (48));
+            area.removeFromTop (gap);
+            auto sub2 = area.removeFromTop (lengthRowHeight).withTrimmedLeft (nameWidth);
+            row->handleLabel.setBounds (sub2.removeFromLeft (140));
+            sub2.removeFromLeft (gap);
+            row->handleSeconds.setBounds (sub2.removeFromLeft (44));
+            row->tracksLabel.setBounds (sub2.removeFromLeft (120));
+            sub2.removeFromLeft (gap);
+            row->tracksPerScene.setBounds (sub2.removeFromLeft (36));
             area.removeFromTop (gap);
         }
     }

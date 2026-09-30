@@ -21,10 +21,16 @@ Add to `~/.zshrc` or `~/.bash_profile` for persistence:
 echo 'export AAX_SDK_PATH="/path/to/aax-sdk-2-9-0"' >> ~/.zshrc
 ```
 
-### 3. PACE Eden SDK (for Code Signing)
-Download from iLok.com:
-- Install **PACE Eden 5 SDK** for macOS
-- Includes `wraptool` at `/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool`
+### 3. PACE Code Signing For AAX SDK (for Code Signing)
+Only needed for the regular Pro Tools; the Pro Tools Developer Build loads unsigned plugins.
+- Register as an AAX developer with Avid; PACE then deposits the licences "PACE Tools"
+  (wraptool 6; "Eden Tools" is the older wraptool 5) and "PACE Central Access" on your
+  iLok account and mails the link to PACE Central. Activate both on an iLok USB key.
+- In PACE Central download **Fusion SDK → PACE Code Signing For AAX SDK** for macOS or
+  Windows ("for signing and wrapping only") and create a wrap configuration
+  (Fusion version 6, customer experience "Signing Only"). Its GUID is the `PACE_WCGUID` below.
+- `wraptool` lands at `/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool`
+  (Windows: `C:\Program Files\PACEAntiPiracy\Eden\Fusion\Versions\6\bin\wraptool.exe`).
 
 ---
 
@@ -160,44 +166,41 @@ file ../Resources/python/bin/python3
 
 ## Step 3: Sign Plugin with PACE
 
-### Manual Signing
+Every build overwrites the plugin binary, so sign again after each build and before
+installing. The iLok with the "PACE Tools" licence must be plugged in. Account and
+wrap-configuration GUID are read from the environment; nothing personal is kept in the
+repository.
+
+### macOS
 ```bash
-cd build/pt_v2a_artefacts/AAX
-
-# Sign with PACE wraptool
-/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool sign \
-    --verbose \
-    --account YOUR_DEVELOPER_ACCOUNT \
-    --password YOUR_PASSWORD \
-    --wcguid YOUR_DEVELOPER_WCGUID \
-    --in AI Sound Design.aaxplugin \
-    --out AI Sound Design.aaxplugin
-
-# Verify signature
-/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool verify \
-    --in AI Sound Design.aaxplugin
+export ILOK_ACCOUNT=your_ilok_user
+export PACE_WCGUID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+bash sign_aax_mac.sh        # asks for the iLok password; creates a self-signed certificate on first use
 ```
 
-### Automated Signing (Optional)
-
-Add to `aax-plugin/CMakeLists.txt`:
-```cmake
-if(APPLE)
-    set(PACE_WRAPTOOL "/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool")
-    set(PACE_ACCOUNT "your_account" CACHE STRING "PACE Account")
-    set(PACE_WCGUID "your_wcguid" CACHE STRING "PACE WCGUID")
-    
-    add_custom_command(TARGET pt_v2a_AAX POST_BUILD
-        COMMAND ${PACE_WRAPTOOL} sign
-            --verbose
-            --account ${PACE_ACCOUNT}
-            --wcguid ${PACE_WCGUID}
-            --in $<TARGET_FILE_DIR:pt_v2a_AAX>/../..
-            --out $<TARGET_FILE_DIR:pt_v2a_AAX>/../..
-        COMMENT "Signing AAX Plugin with PACE..."
-    )
-endif()
+### Windows
+```powershell
+$env:ILOK_ACCOUNT = "your_ilok_user"
+$env:PACE_WCGUID  = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+$env:ILOK_PASSWORD = "..."   # first run only: wraptool keeps it in the credential store
+.\sign_aax_windows.ps1       # signs build-aax-vs\...\Release\AAX\AI Sound Design.aaxplugin in place, then verifies
 ```
+`-Plugin <path>` signs another bundle, `-VerifyOnly` just checks one.
+
+### Notes
+- Pro Tools checks PACE's signature, not the platform certificate chain, so a self-signed
+  Authenticode certificate (Windows) or self-signed codesign identity (macOS) is enough
+  for a research build. Both scripts create one on first use. On Windows the key must be
+  a CryptoAPI key (`-Provider "Microsoft Enhanced RSA and AES Cryptographic Provider"`),
+  a CNG key is rejected by wraptool as "doesn't contain a valid signing certificate".
+- `SigningCertExpired`: the signing certificate stored on the iLok has expired. Select the
+  iLok in the iLok License Manager and click **Synchronize**, then sign again.
+- `MissingFusionToolsLicense` for "PACE Tools": the licence is on another location (for
+  example the iLok Cloud); move it to the plugged-in iLok USB key.
+- Windows: `wraptool sign --in` takes the `.aaxplugin` folder, `wraptool verify --in`
+  wants the DLL inside `Contents\x64`.
+- The PACE signature records the iLok account holder's name as signer name inside the
+  binary; anyone with wraptool can read it with `verify`.
 
 ---
 

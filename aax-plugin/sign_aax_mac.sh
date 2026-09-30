@@ -5,9 +5,13 @@
 # Documentation: https://docs.paceap.com/lite/SDK/aax/platform_certificates/
 
 # === Settings ===
-WRAPTOOL="/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool"
-ILOK_ACCOUNT="anonymous"
-WCGUID="7DC00430-D05C-11F0-8D10-00505692AD3E"
+# Account and wrap-configuration GUID come from the environment, nothing
+# personal is kept in this file (see sign_aax_windows.ps1 for Windows):
+#   ILOK_ACCOUNT  iLok user name
+#   PACE_WCGUID   wrap-configuration GUID from PACE Central
+WRAPTOOL="${WRAPTOOL:-/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool}"
+ILOK_ACCOUNT="${ILOK_ACCOUNT:?set ILOK_ACCOUNT to your iLok user name}"
+WCGUID="${PACE_WCGUID:?set PACE_WCGUID to the wrap-configuration GUID from PACE Central}"
 SIGNID="your-certificate-common-name-here"  # Will be set below after certificate creation
 
 # Plugin paths
@@ -134,7 +138,6 @@ security unlock-keychain ~/Library/Keychains/login.keychain-db 2>/dev/null || tr
     --in "$PLUGIN_PATH" \
     --out "$PLUGIN_PATH" \
     --autoinstall off \
-    --dsig1-compat off \
     2>&1 | tee /tmp/wraptool.log
 
 WRAP_EXIT_CODE=${PIPESTATUS[0]}

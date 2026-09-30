@@ -72,19 +72,37 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     autoSpotToggle.setVisible (false);
     contentComponent.addAndMakeVisible (autoSpotToggle);
 
-    // Hybrid: library recordings that sound like the generated sounds, next to or instead of them
-    useDatabaseSoundsToggle.setTooltip ("On: for every generated sound the backend also finds library recordings "
-                                        "that sound like it, stitched from at most the pieces per 10 s set in Settings, "
-                                        "and places them on a track underneath the generated one.");
+    // Hybrid: library recordings that sound like the generated sounds, instead of or next to them
+    useDatabaseSoundsToggle.setTooltip ("On: for every generated sound the backend finds library recordings that "
+                                        "sound like it, stitched from at most the pieces per 10 s set in Settings, "
+                                        "and places them instead of the generated sound (which stays only where "
+                                        "nothing matched).");
     useDatabaseSoundsToggle.setVisible (false);
-    useDatabaseSoundsToggle.onClick = [this] { replaceGeneratedToggle.setEnabled (useDatabaseSoundsToggle.getToggleState()
-                                                                                && useDatabaseSoundsToggle.isEnabled()); };
+    useDatabaseSoundsToggle.onClick = [this]
+    {
+        const bool on = useDatabaseSoundsToggle.getToggleState() && useDatabaseSoundsToggle.isEnabled();
+        keepGeneratedToggle.setEnabled (on);
+        ambienceHandlesToggle.setEnabled (on);
+    };
     contentComponent.addAndMakeVisible (useDatabaseSoundsToggle);
-    replaceGeneratedToggle.setTooltip ("On: only the library pieces are placed, the generated sound stays out "
-                                       "(it is still placed when nothing matched).");
-    replaceGeneratedToggle.setEnabled (false);
-    replaceGeneratedToggle.setVisible (false);
-    contentComponent.addAndMakeVisible (replaceGeneratedToggle);
+    keepGeneratedToggle.setTooltip ("On: the generated sound is placed too, on its own track above the library pieces. "
+                                    "Off: only the library pieces are placed.");
+    keepGeneratedToggle.setEnabled (false);
+    keepGeneratedToggle.setVisible (false);
+    contentComponent.addAndMakeVisible (keepGeneratedToggle);
+    ambienceHandlesToggle.setToggleState (true, juce::dontSendNotification);
+    ambienceHandlesToggle.setTooltip ("On: an ambience piece keeps the seconds set in Settings (Ambience handles) of "
+                                      "its recording before and after the event, so it can be faded in and out. "
+                                      "Off: the piece is cut to the event.");
+    ambienceHandlesToggle.setEnabled (false);
+    ambienceHandlesToggle.setVisible (false);
+    contentComponent.addAndMakeVisible (ambienceHandlesToggle);
+    // Spotting and Hybrid: scenes across clips
+    detectScenesToggle.setTooltip ("On: the backend first groups the clips of the range into scenes (same place, "
+                                   "continuous time) and names them; one memory location per scene. Costs a model "
+                                   "call per cut.");
+    detectScenesToggle.setVisible (false);
+    contentComponent.addAndMakeVisible (detectScenesToggle);
 
     // (i) next to the mode switch: hover for what the mode does, click for the same text as a dialog
     audioGenModeButton.setTooltip (modeDescription (WorkflowMode::AudioGeneration));
@@ -118,6 +136,13 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     };
     contentComponent.addChildComponent (spotWholeTrackButton);   // shown in spotting mode only
 
+    // Hybrid only: the whole track; the script first counts the clips and estimates the
+    // duration, the dialog with those numbers follows in timerCallback (HybridEstimate)
+    hybridWholeTrackButton.setTooltip ("Every clip on the video track: scenes, events, sounds and placement, "
+                                       "which takes hours for a film. Shows an estimate first.");
+    hybridWholeTrackButton.onClick = [this] { startHybrid (true, false, true); };
+    contentComponent.addChildComponent (hybridWholeTrackButton);
+
     // Progress of multi-clip runs; shown while a run is active
     progressBar.setPercentageDisplay (false);
     progressBar.setColour (juce::ProgressBar::foregroundColourId, juce::Colour (0xff2f7fe0));   // same blue as the lit segment
@@ -129,6 +154,17 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     // Configure unified action button (changes based on workflow mode)
     actionButton.onClick = [this]
     {
+        if ((currentAsyncState == AsyncState::SpottingAnalysis || currentAsyncState == AsyncState::HybridGeneration)
+            && ptslProcess != nullptr)
+        {
+            juce::AlertWindow::showOkCancelBox (
+                juce::MessageBoxIconType::QuestionIcon, "Stop the run?",
+                "What was placed so far stays in the session. A hybrid run over the same range can be "
+                "continued later with \"Run on entire track...\".",
+                "Stop", "Keep running", this,
+                juce::ModalCallbackFunction::create ([this] (int result) { if (result == 1) stopRun(); }));
+            return;
+        }
         if (currentWorkflowMode == WorkflowMode::AudioGeneration)
             handleRenderButtonClicked();
         else if (currentWorkflowMode == WorkflowMode::SoundRecommendation)
@@ -446,7 +482,8 @@ void PtV2AEditor::resized()
     const bool isSoundRec = currentWorkflowMode == WorkflowMode::SoundRecommendation;
     const bool isHybrid   = currentWorkflowMode == WorkflowMode::Hybrid;
     const int audioRows = (isAudioGen || isHybrid) ? 1 : 0;         // negative prompt, seed
-    const int hybridRows = isHybrid ? 2 : 0;                         // event switches, database switches
+    const int hybridRows = isHybrid ? 3 : 0;                         // event switches, database switches, handles/scenes
+    const int spottingRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 1 : 0;   // scene switch
     const int promptRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 0 : 1;   // no prompt in Spotting
     const int toggleHeight = (isSoundRec && toggleSoundResultsButton.isVisible()) ? 28 : 0;
     const int resultsHeight = (isSoundRec && soundRecommendations.isVisible())
@@ -458,7 +495,7 @@ void PtV2AEditor::resized()
                         (20 + 28) * audioRows +  // Negative prompt row
                         (20 + 28) * audioRows +  // Seed row
                         (20 + 28) +  // Backend row (every mode)
-                        (20 + 28) * hybridRows +  // Hybrid switches: events row, database row
+                        (20 + 28) * (hybridRows + spottingRows) +  // Hybrid switch rows, Spotting scene row
                         30 +  // Spacing before buttons
                         28 +  // Button row
                         8 + 28 +  // Whole-track button row
@@ -566,7 +603,21 @@ seedRow.removeFromLeft (20);
     databaseRow.removeFromLeft (75);
     useDatabaseSoundsToggle.setBounds (databaseRow.removeFromLeft (230));
     databaseRow.removeFromLeft (20);
-    replaceGeneratedToggle.setBounds (databaseRow);
+    keepGeneratedToggle.setBounds (databaseRow);
+    r.removeFromTop (isHybrid ? 20 : 0);
+    auto handlesRow = r.removeFromTop (hybridRowHeight);
+    handlesRow.removeFromLeft (75);
+    ambienceHandlesToggle.setBounds (handlesRow.removeFromLeft (230));
+    handlesRow.removeFromLeft (20);
+    if (isHybrid)
+        detectScenesToggle.setBounds (handlesRow);
+    // Spotting: the scene switch alone under the backend row
+    const bool isSpottingMode = currentWorkflowMode == WorkflowMode::AutoSpotting;
+    r.removeFromTop (isSpottingMode ? 20 : 0);
+    auto scenesRow = r.removeFromTop (isSpottingMode ? 28 : 0);
+    scenesRow.removeFromLeft (75);
+    if (isSpottingMode)
+        detectScenesToggle.setBounds (scenesRow);
 
 
     // 30px spacing before next row
@@ -596,6 +647,7 @@ seedRow.removeFromLeft (20);
     const int spotAllW = 200;
     spotAllRow.removeFromLeft ((spotAllRow.getWidth() - spotAllW) / 2);
     spotWholeTrackButton.setBounds (spotAllRow.removeFromLeft (spotAllW));
+    hybridWholeTrackButton.setBounds (spotWholeTrackButton.getBounds());
 
     // Progress of a running multi-clip operation
     r.removeFromTop (8);
@@ -1092,14 +1144,96 @@ void PtV2AEditor::timerCallback()
             break;
         }
         
+        case AsyncState::HybridEstimate:
+        {
+            // hybrid_client.py --estimate: a quick PTSL pass that counts the clips. Then the
+            // dialog with the numbers, and the real run on "Start".
+            if (! ptslProcess)
+            {
+                stopTimer();
+                currentAsyncState = AsyncState::Idle;
+                resetSpottingUi();
+                return;
+            }
+            if (ptslProcess->isRunning())
+            {
+                if (elapsed.inSeconds() > 120)
+                {
+                    juce::Logger::writeToLog ("ERROR: hybrid estimate did not finish in two minutes");
+                    stopTimer();
+                    ptslProcess->kill();
+                    ptslProcess.reset();
+                    currentAsyncState = AsyncState::Idle;
+                    resetSpottingUi();
+                    showStatus ("Could not read the video track (no answer in two minutes). Is Pro Tools open?", true);
+                }
+                return;
+            }
+            const int exitCode = ptslProcess->getExitCode();
+            ptslProcess->readAllProcessOutput();
+            ptslProcess.reset();
+            stopTimer();
+            currentAsyncState = AsyncState::Idle;
+            auto resultFile = spottingProgressFile.withFileExtension ("result.json");
+            auto json = juce::JSON::parse (resultFile.existsAsFile() ? resultFile.loadFileAsString() : juce::String());
+            const juce::String scriptLog = spottingProgressFile.withFileExtension ("log").loadFileAsString();
+            resetSpottingUi();
+            if (exitCode != 0 || ! json.isObject() || ! (bool) json.getProperty ("success", false))
+            {
+                juce::Logger::writeToLog ("Hybrid estimate failed:\n" + scriptLog);
+                showStatus ("Could not read the video track: " + json.getProperty ("error", "see the log").toString(), true);
+                return;
+            }
+            const int clips = (int) json.getProperty ("clips", 0);
+            const double seconds = (double) json.getProperty ("video_seconds", 0.0);
+            const int estimate = (int) json.getProperty ("estimate_seconds", 0);
+            const bool resumable = (bool) json.getProperty ("resumable", false);
+            const int clipsDone = (int) json.getProperty ("clips_done", 0);
+            const bool scenesKnown = (bool) json.getProperty ("scene_markers_present", false);
+            auto minutes = [] (double s) { return juce::String (juce::roundToInt (s / 60.0)); };
+            juce::String text = juce::String (clips) + (clips == 1 ? " clip, " : " clips, ")
+                                + minutes (seconds) + " min of video on the track.\n\n"
+                                + "Rough duration: " + (estimate >= 5400 ? juce::String (estimate / 3600.0, 1) + " hours"
+                                                                        : minutes (estimate) + " minutes")
+                                + " with a warm backend, more for the first clip.\n\n"
+                                + (scenesKnown ? "The scene memory locations in the session are used as they are.\n"
+                                               : detectScenesToggle.getToggleState()
+                                                     ? "Scenes are detected first; a spotting run with Detect scenes "
+                                                       "beforehand lets you correct them before this run.\n"
+                                                     : juce::String())
+                                + "Pro Tools is busy while sounds are placed. The Stop button ends the run; "
+                                  "what was placed stays, and the run can be continued later.";
+            if (resumable)
+            {
+                juce::AlertWindow::showYesNoCancelBox (
+                    juce::MessageBoxIconType::QuestionIcon, "Continue the earlier run?",
+                    "An earlier run over this range answered " + juce::String (clipsDone)
+                    + (clipsDone == 1 ? " clip" : " clips") + " and was not finished.\n\n" + text,
+                    "Continue", "Start over", "Cancel", this,
+                    juce::ModalCallbackFunction::create ([this] (int result)
+                    {
+                        if (result == 1) startHybrid (true, true);
+                        else if (result == 2) startHybrid (true, false);
+                    }));
+            }
+            else
+            {
+                juce::AlertWindow::showOkCancelBox (
+                    juce::MessageBoxIconType::QuestionIcon, "Run on the entire track?", text,
+                    "Start", "Cancel", this,
+                    juce::ModalCallbackFunction::create ([this] (int result) { if (result == 1) startHybrid (true, false); }));
+            }
+            return;
+        }
+
         case AsyncState::SpottingAnalysis:
         case AsyncState::HybridGeneration:
         {
             // spotting_client.py or hybrid_client.py is running: cut, backend call, placement.
-            // A cold backend may have to load its model first, hence the long limit; the
-            // hybrid run generates one sound per event, so it gets longer still.
+            // The script rewrites its progress file every few seconds (heartbeat), so the
+            // run has no time limit; only when the file stops changing is the user asked.
             const bool hybrid = currentAsyncState == AsyncState::HybridGeneration;
-            const int spottingTimeoutMs = hybrid ? 1800000 : 600000;
+            constexpr int staleMs = 5 * 60 * 1000;
             const juce::String what = hybrid ? "Hybrid generation" : "Spotting";
 
             if (!ptslProcess)
@@ -1111,50 +1245,57 @@ void PtV2AEditor::timerCallback()
             }
 
             const auto sinceProgress = juce::Time::getCurrentTime() - juce::jmax (asyncOperationStartTime, lastProgressTime);
-            if (sinceProgress.inMilliseconds() > spottingTimeoutMs)
+            if (sinceProgress.inMilliseconds() > staleMs && ! staleDialogOpen && ptslProcess->isRunning())
             {
-                // No progress for ten minutes. The script's own log file survives the kill,
-                // so it can say where it stopped (PTSL, ffmpeg, backend).
-                juce::String lastStage = progressLabel.getText();
-                juce::StringArray scriptLog;
-                scriptLog.addLines (spottingProgressFile.withFileExtension ("log").loadFileAsString());
-                scriptLog.removeEmptyStrings();
-                while (scriptLog.size() > 12)
-                    scriptLog.remove (0);
-
-                juce::Logger::writeToLog ("ERROR: " + what + " timed out. Last stage: " + lastStage);
-                juce::Logger::writeToLog ("Script log tail:\n" + scriptLog.joinIntoString ("\n"));
-                stopTimer();
-                ptslProcess->kill();
-                ptslProcess.reset();
-                currentAsyncState = AsyncState::Idle;
-
-                juce::AlertWindow::showMessageBoxAsync (
-                    juce::MessageBoxIconType::WarningIcon,
-                    what + " Timeout",
-                    "No progress for " + juce::String (spottingTimeoutMs / 60000) + " minutes; the run was stopped.\n\n"
-                    "Last stage: " + (lastStage.isNotEmpty() ? lastStage : juce::String ("unknown")) + "\n\n"
-                    + (scriptLog.isEmpty() ? juce::String ("The script wrote no log.")
-                                           : "Script log:\n" + scriptLog.joinIntoString ("\n")),
-                    "OK"
-                );
-                resetSpottingUi();
-                return;
+                // No sign of life for five minutes: the script is stuck (PTSL, ffmpeg, a
+                // backend that hangs) or a stage is just very slow. The user decides.
+                staleDialogOpen = true;
+                const juce::String lastStage = progressLabel.getText();
+                juce::Logger::writeToLog ("WARNING: " + what + ": no sign of life for five minutes. Last stage: " + lastStage);
+                juce::AlertWindow::showOkCancelBox (
+                    juce::MessageBoxIconType::WarningIcon, what + ": no sign of life",
+                    "The script has not reported anything for five minutes.\n\nLast stage: "
+                    + (lastStage.isNotEmpty() ? lastStage : juce::String ("unknown"))
+                    + "\n\nKeep waiting, or stop the run? What was placed so far stays.",
+                    "Keep waiting", "Stop", this,
+                    juce::ModalCallbackFunction::create ([this] (int result)
+                    {
+                        staleDialogOpen = false;
+                        if (currentAsyncState != AsyncState::SpottingAnalysis && currentAsyncState != AsyncState::HybridGeneration)
+                            return;                     // finished meanwhile
+                        if (result == 1)
+                            lastProgressTime = juce::Time::getCurrentTime();
+                        else
+                            stopRun();
+                    }));
             }
 
             if (ptslProcess->isRunning())
             {
                 updateSpottingProgress();
-                actionButton.setButtonText ((hybrid ? "Generating... (" : "Spotting... (")
-                                            + juce::String ((int) elapsed.inSeconds()) + "s)");
+                actionButton.setEnabled (true);
+                actionButton.setButtonText ("Stop  (" + juce::String ((int) elapsed.inSeconds()) + "s)");
                 return;
             }
 
-            int exitCode = ptslProcess->getExitCode();
+                        int exitCode = ptslProcess->getExitCode();
             auto output = ptslProcess->readAllProcessOutput();
             ptslProcess.reset();
             stopTimer();
             currentAsyncState = AsyncState::Idle;
+            const juce::String lastLabel = progressLabel.getText();
+            if (runStopped)
+            {
+                runStopped = false;
+                juce::Logger::writeToLog (what + " stopped by the user after " + juce::String (elapsed.inSeconds(), 1)
+                                          + "s. Last stage: " + lastLabel);
+                juce::Logger::writeToLog (spottingProgressFile.withFileExtension ("log").loadFileAsString());
+                resetSpottingUi();
+                showStatus (what + " stopped (" + (lastLabel.isNotEmpty() ? lastLabel : juce::String ("no stage reported"))
+                            + "). What was placed stays" + (hybrid ? "; Run on entire track... can continue the run." : "."),
+                            true);
+                return;
+            }
 
             // The script keeps its log and its result in files next to the progress
             // file (the pipe holds only 4 KB and is read after exit, so anything
@@ -1198,13 +1339,22 @@ void PtV2AEditor::timerCallback()
                 const int dbPieces = (int) json.getProperty ("db_pieces", 0);
                 const int dbPlaced = (int) json.getProperty ("db_placed", 0);
                 const bool replaced = (bool) json.getProperty ("replaced", false);
+                const int tracks = (int) json.getProperty ("tracks_used", 0);
+                const int sceneCount = json.getProperty ("scenes", juce::var()).isArray()
+                                           ? json.getProperty ("scenes", juce::var()).getArray()->size() : 0;
                 juce::String message = juce::String (placed) + " of " + juce::String (sounds)
-                                       + (replaced ? " sounds replaced by library pieces" : " sounds placed on their own tracks")
+                                       + (replaced ? " sounds replaced by library pieces" : " sounds placed")
+                                       + (tracks > 0 ? " on " + juce::String (tracks) + (tracks == 1 ? " track" : " tracks") : "")
+                                       + (sceneCount > 0 ? " in " + juce::String (sceneCount) + (sceneCount == 1 ? " scene" : " scenes") : "")
                                        + ", from " + juce::String (clips) + (clips == 1 ? " clip" : " clips");
+                if (const int dropped = (int) json.getProperty ("dropped_layers", 0); dropped > 0)
+                    message += "; " + juce::String (dropped) + " extra library layer(s) left out (tracks per scene)";
                 if (dbPieces > 0)
                     message += "; " + juce::String (dbPlaced) + " of " + juce::String (dbPieces) + " library pieces placed";
                 if (const int markers = (int) json.getProperty ("markers_created", 0); markers > 0)
                     message += "; " + juce::String (markers) + " memory locations for the events the backend found";
+                if (const int scenes = (int) json.getProperty ("scene_markers", 0); scenes > 0)
+                    message += "; " + juce::String (scenes) + (scenes == 1 ? " scene" : " scenes") + " as memory locations";
                 if (failedClips > 0)
                     message += "; " + juce::String (failedClips) + " clip(s) failed, see the log";
                 showStatus (message, failedClips > 0 || placed < sounds || dbPlaced < dbPieces);
@@ -2373,6 +2523,7 @@ void PtV2AEditor::resetActionUi()
     actionButton.setEnabled (true);
     actionButton.setButtonText (idleActionButtonText());
     spotWholeTrackButton.setEnabled (true);
+    hybridWholeTrackButton.setEnabled (true);
     progressBar.setVisible (false);
     progressLabel.setVisible (false);
     currentAsyncState = AsyncState::Idle;
@@ -2480,6 +2631,7 @@ void PtV2AEditor::handleWorkflowModeChange()
     
     // Whole-track button only visible in Auto Spotting mode
     spotWholeTrackButton.setVisible (isAutoSpotting);
+    hybridWholeTrackButton.setVisible (isHybrid);
     
     // Generation parameters: Sound Generation and Hybrid
     negativePromptInput.setVisible (isAudioGen || isHybrid);
@@ -2490,7 +2642,9 @@ void PtV2AEditor::handleWorkflowModeChange()
     useMemoryLocationsToggle.setVisible (isHybrid);
     autoSpotToggle.setVisible (isHybrid);
     useDatabaseSoundsToggle.setVisible (isHybrid);
-    replaceGeneratedToggle.setVisible (isHybrid);
+    keepGeneratedToggle.setVisible (isHybrid);
+    ambienceHandlesToggle.setVisible (isHybrid);
+    detectScenesToggle.setVisible (isHybrid || currentWorkflowMode == WorkflowMode::AutoSpotting);
     
     // V2A/T2A toggle only visible in Sound Generation (not used in Sound Recommendation)
     // Sound Search automatically tries video detection first, then falls back to text-only
@@ -2716,11 +2870,12 @@ void PtV2AEditor::applyHybridMatchAvailability()
     if (! hybridMatchAvailable)
         useDatabaseSoundsToggle.setToggleState (false, juce::dontSendNotification);
     useDatabaseSoundsToggle.setTooltip (hybridMatchAvailable
-        ? juce::String ("On: for every generated sound the backend also finds library recordings that sound like it, "
-                        "stitched from at most the pieces per 10 s set in Settings, and places them on a track "
-                        "underneath the generated one.")
+        ? juce::String ("On: for every generated sound the backend finds library recordings that sound like it, "
+                        "stitched from at most the pieces per 10 s set in Settings, and places them instead of the "
+                        "generated sound (which stays only where nothing matched).")
         : "Not available: " + hybridMatchReason);
-    replaceGeneratedToggle.setEnabled (hybridMatchAvailable && useDatabaseSoundsToggle.getToggleState());
+    keepGeneratedToggle.setEnabled (hybridMatchAvailable && useDatabaseSoundsToggle.getToggleState());
+    ambienceHandlesToggle.setEnabled (hybridMatchAvailable && useDatabaseSoundsToggle.getToggleState());
 }
 
 void PtV2AEditor::refreshHybridBackendHealth()
@@ -3574,10 +3729,18 @@ void PtV2AEditor::handleHybridButtonClicked()
                                                 "Open Settings to add or pick one.", "OK");
         return;
     }
-    startHybrid();
+    startHybrid (false, false);
 }
 
-void PtV2AEditor::startHybrid()
+void PtV2AEditor::stopRun()
+{
+    if (ptslProcess == nullptr)
+        return;
+    runStopped = true;
+    ptslProcess->kill();            // the exit branch of timerCallback reports where it was
+}
+
+void PtV2AEditor::startHybrid (bool wholeTrack, bool resume, bool estimate)
 {
     auto scriptPath = processor.getAPIClientScript().getParentDirectory().getChildFile ("hybrid_client.py");
 
@@ -3591,7 +3754,11 @@ void PtV2AEditor::startHybrid()
     args.add ("-X");
     args.add ("utf8");
     args.add (scriptPath.getFullPathName());
-    args.add ("--from-selection");
+    args.add (wholeTrack ? "--whole-track" : "--from-selection");
+    if (resume)
+        args.add ("--resume");
+    if (estimate)
+        args.add ("--estimate");
     args.add ("--progress-file");
     args.add (spottingProgressFile.getFullPathName());
     args.add ("--adapter");
@@ -3617,9 +3784,13 @@ void PtV2AEditor::startHybrid()
     if (useDatabaseSoundsToggle.getToggleState() && useDatabaseSoundsToggle.isEnabled())
     {
         args.add ("--use-database");
-        if (replaceGeneratedToggle.getToggleState())
-            args.add ("--replace-generated");
+        if (keepGeneratedToggle.getToggleState())
+            args.add ("--keep-generated");
+        if (! ambienceHandlesToggle.getToggleState())
+            args.add ("--no-handles");
     }
+    if (detectScenesToggle.getToggleState())
+        args.add ("--scenes");
 
     juce::Logger::writeToLog ("Hybrid command: " + args.joinIntoString (" "));
 
@@ -3635,12 +3806,18 @@ void PtV2AEditor::startHybrid()
         return;
     }
 
-    currentAsyncState = AsyncState::HybridGeneration;
+    currentAsyncState = estimate ? AsyncState::HybridEstimate : AsyncState::HybridGeneration;
     asyncOperationStartTime = juce::Time::getCurrentTime();
+    lastProgressTime = asyncOperationStartTime;
+    staleDialogOpen = false;
+    runStopped = false;
     actionButton.setEnabled (false);
-    actionButton.setButtonText ("Generating...");
+    hybridWholeTrackButton.setEnabled (false);
+    actionButton.setButtonText (estimate ? "Counting clips..." : "Generating...");
     progressValue = -1.0;
-    progressLabel.setText ("Reading selection...", juce::dontSendNotification);
+    progressLabel.setText (estimate ? "Reading the video track..." : wholeTrack ? "Reading the video track..."
+                                                                                : "Reading selection...",
+                           juce::dontSendNotification);
     progressBar.setVisible (true);
     progressLabel.setVisible (true);
     startTimer (TIMER_INTERVAL_MS);
@@ -3662,6 +3839,8 @@ void PtV2AEditor::startSpotting (bool wholeTrack)
     args.add ("utf8");
     args.add (scriptPath.getFullPathName());
     args.add (wholeTrack ? "--whole-track" : "--from-selection");
+    if (detectScenesToggle.getToggleState())
+        args.add ("--scenes");
     args.add ("--progress-file");
     args.add (spottingProgressFile.getFullPathName());
 
@@ -3686,6 +3865,9 @@ void PtV2AEditor::startSpotting (bool wholeTrack)
 
     currentAsyncState = AsyncState::SpottingAnalysis;
     asyncOperationStartTime = juce::Time::getCurrentTime();
+    lastProgressTime = asyncOperationStartTime;
+    staleDialogOpen = false;
+    runStopped = false;
     actionButton.setEnabled (false);
     spotWholeTrackButton.setEnabled (false);
     actionButton.setButtonText ("Spotting...");
@@ -3737,7 +3919,18 @@ void PtV2AEditor::updateSpottingProgress()
     if (hasFraction)
         stageText += (detail.isNotEmpty() ? ", " + detail : juce::String())
                      + ", " + juce::String (juce::roundToInt (fraction * 100.0)) + "%";
-    progressLabel.setText (total > 0 && current > 0 && clip.isNotEmpty()
+    else if (detail.isNotEmpty())
+        stageText += ", " + detail;
+    const juce::var etaVar = doc.getProperty ("eta_seconds", juce::var());
+    if ((etaVar.isDouble() || etaVar.isInt()) && (double) etaVar > 0)
+    {
+        const int etaMin = juce::jmax (1, juce::roundToInt ((double) etaVar / 60.0));
+        stageText += etaMin >= 90 ? "; about " + juce::String (etaMin / 60.0, 1) + " h left"
+                                  : "; about " + juce::String (etaMin) + " min left";
+    }
+    progressLabel.setText (stage == "placing" && clip.isNotEmpty()
+                               ? "Placing " + clip + "  (" + stageText + ")"
+                           : total > 0 && current > 0 && clip.isNotEmpty()
                                ? "Clip " + juce::String (current) + " of " + juce::String (total) + ": " + clip + "  (" + stageText + ")"
                                : stageText,
                            juce::dontSendNotification);
@@ -3748,6 +3941,7 @@ void PtV2AEditor::resetSpottingUi()
     actionButton.setEnabled (true);
     actionButton.setButtonText (idleActionButtonText());
     spotWholeTrackButton.setEnabled (true);
+    hybridWholeTrackButton.setEnabled (true);
     progressBar.setVisible (false);
     progressLabel.setVisible (false);
     spottingProgressFile.deleteFile();

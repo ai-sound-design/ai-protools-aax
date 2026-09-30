@@ -48,8 +48,12 @@ backend can also answer library recordings that sound like each generated sound
 (the plugin's "Use database sounds"); the "match" block holds the settings sent
 along: "pieces_per_10s" (how finely a sound may be stitched from pieces),
 "min_piece_seconds", "layers" (further recordings stacked underneath), "text_weight"
-(share of the event's description in the score) and "min_similarity" (pieces below
-it are not placed; a sound without a convincing match keeps its generated version).
+(share of the event's description in the score), "min_similarity" (pieces below it
+are not placed; a sound without a convincing match keeps its generated version) and
+"ambience_handle_seconds" (an ambience piece keeps that much of its recording before
+and after the matched stretch, for fades) and "tracks_per_scene" (placement only, not
+sent: at most this many tracks per scene, see hybrid_client.py). "request.scenes_endpoint"
+(default "/hybrid/scenes") groups the clips of a range into scenes (see scenes_with_profile).
 
 A search profile may add constant form fields
 that are sent with every query, which is how one profile per library is made:
@@ -163,7 +167,8 @@ DEFAULT_PROFILES: Dict[str, Dict[str, Any]] = {
         },
         "response": {"kind": "json", "sounds_field": "sounds", "audio_url_field": "audio_url"},
         "supports": ["negative_prompt", "seed", "memory_locations", "database_match"],
-        "match": {"pieces_per_10s": 3, "min_piece_seconds": 2, "layers": 1, "text_weight": 0.0, "min_similarity": 0.5},
+        "match": {"pieces_per_10s": 3, "min_piece_seconds": 2, "layers": 1, "text_weight": 0.0, "min_similarity": 0.5,
+                  "ambience_handle_seconds": 10, "tracks_per_scene": 8},
         "timeout_seconds": 1800,
     },
 }
@@ -494,7 +499,8 @@ def generate_with_profile(profile: Dict[str, Any], *, video_path: Optional[str],
     return str(target)
 
 
-MATCH_DEFAULTS = {"pieces_per_10s": 3, "min_piece_seconds": 2.0, "layers": 1, "text_weight": 0.0, "min_similarity": 0.5}
+MATCH_DEFAULTS = {"pieces_per_10s": 3, "min_piece_seconds": 2.0, "layers": 1, "text_weight": 0.0, "min_similarity": 0.5,
+                  "ambience_handle_seconds": 10.0, "tracks_per_scene": 8}
 
 
 def match_settings(profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -527,7 +533,7 @@ def hybrid_with_profile(profile: Dict[str, Any], *, video_path: str, start_timec
     if match:
         data["match"] = "true"
         for key in ("pieces_per_10s", "min_piece_seconds", "layers", "text_weight", "library", "category_filter",
-                    "min_similarity"):
+                    "min_similarity", "ambience_handle_seconds"):
             if match.get(key) not in (None, ""):
                 data[key] = str(match[key]).lower() if isinstance(match[key], bool) else str(match[key])
     job_id = uuid.uuid4().hex
@@ -576,6 +582,35 @@ def hybrid_with_profile(profile: Dict[str, Any], *, video_path: str, start_timec
             piece["path"] = str(piece_target)
     payload[str(response_spec.get("sounds_field", "sounds"))] = sounds
     return payload
+
+
+def scenes_with_profile(profile: Dict[str, Any], clips: List[Tuple[str, str]], *, timeout: Optional[int] = None,
+                        log=print, on_progress=None) -> Dict[str, Any]:
+    """POST the clips of a range (path, name), in timeline order, to the hybrid backend's
+    scenes endpoint. Returns its JSON: "scenes" [{index, name, description, first_clip,
+    last_clip}] and "clip_scenes" (scene index per clip)."""
+    import requests
+
+    request_spec = profile.get("request") or {}
+    endpoint = str(request_spec.get("scenes_endpoint", "/hybrid/scenes"))
+    url = profile_url(profile) + endpoint
+    timeout = timeout or int(profile.get("timeout_seconds", 1800))
+    job_id = uuid.uuid4().hex
+    handles = [open(path, "rb") for path, _ in clips]
+    try:
+        files = [("videos", (Path(path).name, handle, "video/mp4")) for (path, _), handle in zip(clips, handles)]
+        data = {"names": json.dumps([name for _, name in clips], ensure_ascii=False), "job_id": job_id}
+        log(f"Adapter '{profile.get('name')}': POST {url} with {len(clips)} clip(s)")
+        # Progress is reported under the backend's usual progress endpoint (/hybrid/progress/{job_id})
+        with ProgressPolling(progress_url_for(profile, str(request_spec.get("endpoint", "/hybrid")), job_id),
+                             on_progress):
+            response = requests.post(url, files=files, data=data, headers=get_cf_headers(), timeout=timeout)
+    finally:
+        for handle in handles:
+            handle.close()
+    if response.status_code != 200:
+        raise RuntimeError(f"{profile.get('name')} answered {response.status_code}: {response.text[:400]}")
+    return response.json()
 
 
 def describe() -> Dict[str, Any]:
