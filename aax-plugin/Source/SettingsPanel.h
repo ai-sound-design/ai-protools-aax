@@ -40,9 +40,10 @@ private:
         bool hasLengths() const { return profile.isValid() && profile.kind == "generation"; }
         // Hybrid profiles only: how finely a generated sound may be stitched from library pieces
         juce::Label piecesLabel { {}, "Pieces per 10 s" };
-        juce::TextEditor pieces, layers, minSimilarity, handleSeconds, tracksPerScene;
+        juce::TextEditor pieces, layers, minSimilarity, handleSeconds, tracksPerScene, fadePreset, fadeSeconds;
         juce::Label layersLabel { {}, "max db tracks" }, similarityLabel { {}, "min similarity" };
         juce::Label handleLabel { {}, "Ambience handles (s)" }, tracksLabel { {}, "tracks per scene" };
+        juce::Label fadeLabel { {}, "Fade preset" }, fadeSecondsLabel { {}, "fade (s)" };
         bool hasMatch() const { return profile.isValid() && profile.kind == "hybrid"; }
         bool hasSubRow() const { return hasLengths() || hasMatch(); }
     };

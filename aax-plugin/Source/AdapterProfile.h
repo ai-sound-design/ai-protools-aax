@@ -31,6 +31,8 @@ struct AdapterProfile
     double minSimilarity = 0.5;   ///< pieces below it are not placed
     double ambienceHandleSeconds = 10.0;   ///< an ambience piece keeps this much of its recording before and after
     int tracksPerScene = 8;                ///< the sounds of a scene share at most this many tracks
+    juce::String fadePreset { "AI Sound Design" };   ///< Pro Tools batch-fades preset for the ambience handles
+    double fadeSeconds = 1.0;              ///< how much handle a clip keeps outside the event for that fade
 
     bool isValid() const noexcept { return file.isNotEmpty(); }
     bool supportsFeature (const juce::String& feature) const { return supports.contains (feature); }

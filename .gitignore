@@ -174,3 +174,7 @@ db-dump/*.sql
 
 # BBC metadata database backups (not part of the anonymized repository)
 companion/database/*.sql
+
+# Windows installer build output (build_installer_windows.ps1)
+aax-plugin/installer_output/
+aax-plugin/installer_staging/

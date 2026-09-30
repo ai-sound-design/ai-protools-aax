@@ -47,10 +47,12 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     //   Sound Generation     |
     //                        | Hybrid   (one generated sound per event)
     //   Sound Recommendation |
-    setUpSegment (autoSpottingModeButton, 1000, juce::Button::ConnectedOnBottom);
-    setUpSegment (audioGenModeButton,     1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnBottom | juce::Button::ConnectedOnRight);
-    setUpSegment (soundRecModeButton,     1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnRight);
-    setUpSegment (hybridModeButton,       1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnLeft);
+    // Three single modes in a column on the left; Hybrid, which combines them, spans
+    // all three rows on the right.
+    setUpSegment (autoSpottingModeButton, 1000, juce::Button::ConnectedOnBottom | juce::Button::ConnectedOnRight);
+    setUpSegment (soundRecModeButton,     1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnBottom | juce::Button::ConnectedOnRight);
+    setUpSegment (audioGenModeButton,     1000, juce::Button::ConnectedOnTop | juce::Button::ConnectedOnRight);
+    setUpSegment (hybridModeButton,       1000, juce::Button::ConnectedOnLeft);
     audioGenModeButton.setToggleState (true, juce::dontSendNotification);  // Default: Sound Generation
     for (auto* button : { &autoSpottingModeButton, &audioGenModeButton, &soundRecModeButton, &hybridModeButton })
     {
@@ -60,17 +62,13 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
 
     // Hybrid: whether the session's memory locations define the sound events
     useMemoryLocationsToggle.setToggleState (true, juce::dontSendNotification);
-    useMemoryLocationsToggle.setTooltip ("On: the memory locations inside the selection (a spotting run, or markers you "
-                                         "set) are the sound events. Off: the backend finds the events itself.");
+    useMemoryLocationsToggle.setTooltip ("On: the memory locations inside the range are used as they are: event markers "
+                                         "(a spotting run, or markers you set) as the sound events, \"Scene n: ...\" "
+                                         "markers as the scenes; a clip without events is spotted by the backend, "
+                                         "scenes without markers are detected. Off: the backend spots and detects "
+                                         "everything itself.");
     useMemoryLocationsToggle.setVisible (false);
-    useMemoryLocationsToggle.onClick = [this] { autoSpotToggle.setEnabled (useMemoryLocationsToggle.getToggleState()
-                                                                            && useMemoryLocationsToggle.isEnabled()); };
     contentComponent.addAndMakeVisible (useMemoryLocationsToggle);
-    autoSpotToggle.setToggleState (true, juce::dontSendNotification);
-    autoSpotToggle.setTooltip ("On: a clip in the selection without memory locations is spotted by the backend first. "
-                               "Off: such a clip is skipped.");
-    autoSpotToggle.setVisible (false);
-    contentComponent.addAndMakeVisible (autoSpotToggle);
 
     // Hybrid: library recordings that sound like the generated sounds, instead of or next to them
     useDatabaseSoundsToggle.setTooltip ("On: for every generated sound the backend finds library recordings that "
@@ -83,6 +81,7 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
         const bool on = useDatabaseSoundsToggle.getToggleState() && useDatabaseSoundsToggle.isEnabled();
         keepGeneratedToggle.setEnabled (on);
         ambienceHandlesToggle.setEnabled (on);
+        autoFadeToggle.setEnabled (on && ambienceHandlesToggle.getToggleState());
     };
     contentComponent.addAndMakeVisible (useDatabaseSoundsToggle);
     keepGeneratedToggle.setTooltip ("On: the generated sound is placed too, on its own track above the library pieces. "
@@ -92,31 +91,66 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     contentComponent.addAndMakeVisible (keepGeneratedToggle);
     ambienceHandlesToggle.setToggleState (true, juce::dontSendNotification);
     ambienceHandlesToggle.setTooltip ("On: an ambience piece keeps the seconds set in Settings (Ambience handles) of "
-                                      "its recording before and after the event, so it can be faded in and out. "
+                                      "its recording before and after the event in its file; the clip is trimmed to "
+                                      "the event, so the handles can be pulled out with the Trim tool. "
                                       "Off: the piece is cut to the event.");
     ambienceHandlesToggle.setEnabled (false);
     ambienceHandlesToggle.setVisible (false);
+    ambienceHandlesToggle.onClick = [this]
+    {
+        autoFadeToggle.setEnabled (ambienceHandlesToggle.isEnabled() && ambienceHandlesToggle.getToggleState());
+    };
     contentComponent.addAndMakeVisible (ambienceHandlesToggle);
-    // Spotting and Hybrid: scenes across clips
+    // Pro Tools' own fades, from a batch-fades preset (Settings), at both ends of a
+    // trimmed ambience piece; editable like any fade, and they follow the clip's edges
+    autoFadeToggle.setToggleState (true, juce::dontSendNotification);
+    autoFadeToggle.setTooltip ("On: an ambience clip keeps the fade length set in Settings (fade (s), default 1) of "
+                               "its handle outside the event on each side and gets Pro Tools' own fade-in and "
+                               "fade-out over that stretch, from the batch-fades preset named in Settings "
+                               "(default \"AI Sound Design\", saved once in Pro Tools). Off: no fades, the clip "
+                               "ends at the event, the fades are yours to set.");
+    autoFadeToggle.setEnabled (false);
+    autoFadeToggle.setVisible (false);
+    contentComponent.addAndMakeVisible (autoFadeToggle);
+    // Spotting: scenes across clips as part of the run. Hybrid always works per scene
+    // (memory locations "Scene n: ..." in the session, else the backend detects them).
     detectScenesToggle.setTooltip ("On: the backend first groups the clips of the range into scenes (same place, "
-                                   "continuous time) and names them; one memory location per scene. Costs a model "
-                                   "call per cut.");
+                                   "continuous time) and names them; one memory location per scene, which the "
+                                   "Hybrid mode then uses. Costs a model call per cut.");
+    detectScenesToggle.setToggleState (true, juce::dontSendNotification);
     detectScenesToggle.setVisible (false);
     contentComponent.addAndMakeVisible (detectScenesToggle);
+    detectEventsToggle.setToggleState (true, juce::dontSendNotification);
+    detectEventsToggle.setTooltip ("On: the backend lists the sound events of the range, one memory location each. "
+                                   "Off: only scenes and clip markers.");
+    detectEventsToggle.setVisible (false);
+    detectEventsToggle.onClick = [this]
+    {
+        for (auto* t : { &dialogueToggle, &foleyToggle, &sfxToggle, &ambienceToggle, &musicToggle })
+            t->setEnabled (detectEventsToggle.getToggleState());
+    };
+    contentComponent.addAndMakeVisible (detectEventsToggle);
+    eventKindsLabel.setFont (juce::Font (14.0f));
+    eventKindsLabel.setVisible (false);
+    contentComponent.addAndMakeVisible (eventKindsLabel);
+    // Which kinds of events: foley covers footsteps, clothes and handled objects; dialogue
+    // and music are rarely wanted from a picture, so they start off.
+    for (auto* t : { &dialogueToggle, &foleyToggle, &sfxToggle, &ambienceToggle, &musicToggle })
+    {
+        t->setToggleState (t == &foleyToggle || t == &sfxToggle || t == &ambienceToggle, juce::dontSendNotification);
+        t->setVisible (false);
+        contentComponent.addAndMakeVisible (*t);
+    }
+    dialogueToggle.setTooltip ("Human speech.");
+    foleyToggle.setTooltip ("Footsteps, clothes, objects handled by people.");
+    sfxToggle.setTooltip ("Machines, vehicles, animals, impacts, weather.");
+    ambienceToggle.setTooltip ("The room tone or atmosphere of the place.");
+    musicToggle.setTooltip ("Music with a visible source.");
 
-    // (i) next to the mode switch: hover for what the mode does, click for the same text as a dialog
+    // Hover a mode button for what the mode does
     audioGenModeButton.setTooltip (modeDescription (WorkflowMode::AudioGeneration));
     soundRecModeButton.setTooltip (modeDescription (WorkflowMode::SoundRecommendation));
     autoSpottingModeButton.setTooltip (modeDescription (WorkflowMode::AutoSpotting));
-    modeInfoButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff353535));
-    modeInfoButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xffa8a8a8));
-    modeInfoButton.onClick = [this]
-    {
-        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon,
-                                                modeInfoTitle(), modeDescription (currentWorkflowMode), "OK");
-    };
-    contentComponent.addAndMakeVisible (modeInfoButton);
-    updateModeInfo();
 
     // Spotting only: the whole video track, after a word about how long that takes
     spotWholeTrackButton.onClick = [this]
@@ -251,6 +285,8 @@ contentComponent.addAndMakeVisible (settingsButton);
     setUpSegment (v2aModeButton, 1001, juce::Button::ConnectedOnRight);
     setUpSegment (t2aModeButton, 1001, juce::Button::ConnectedOnLeft);
     v2aModeButton.setToggleState (true, juce::dontSendNotification);  // Default: V2A mode
+    v2aModeButton.setTooltip ("Video-to-audio: the sound is generated from the video under the marked range, "
+                              "guided by the prompt, and placed at the clip's position.");
     v2aModeButton.onClick = [this] { handleGenerationModeChange(); };
     t2aModeButton.onClick = [this] { handleGenerationModeChange(); };
     contentComponent.addAndMakeVisible (v2aModeButton);
@@ -262,6 +298,9 @@ contentComponent.addAndMakeVisible (settingsButton);
     
     // Items come from the selected backend's profile, see applyAdapterCapabilities()
     durationComboBox.setEnabled (false);  // Initially disabled (V2A mode)
+    durationComboBox.setTooltip ("Auto: the sound is as long as the marked range (the backend's shortest length "
+                                 "when the range is shorter, the backend's default when nothing is marked). "
+                                 "Or a fixed length.");
     contentComponent.addAndMakeVisible (durationComboBox);
     
     // Configure high precision mode toggle (deprecated TODO remove in future)
@@ -423,13 +462,15 @@ void PtV2AEditor::handleT2ARenderButtonClicked()
 {
     juce::Logger::writeToLog ("=== T2A Render Button Clicked ===");
     
-    // Parse duration from dropdown (e.g., "8s" -> 8.0f)
-    juce::String durationText = durationComboBox.getText();
-    float duration = durationText.dropLastCharacters(1).getFloatValue();  // Remove "s" suffix
-    
-    juce::Logger::writeToLog ("T2A Duration: " + juce::String(duration, 1) + "s");
-    
-    // Store duration for later use
+    // The list: "Auto" (the length of the marked range, resolved once the selection
+    // is known) or a fixed length such as "8s"
+    const bool fromSelection = durationComboBox.getSelectedId() == 1;
+    float duration = fromSelection ? 0.0f : durationComboBox.getText().dropLastCharacters (1).getFloatValue();
+
+    juce::Logger::writeToLog ("T2A Duration: " + (fromSelection ? juce::String ("the selection")
+                                                                : juce::String (duration, 1) + "s"));
+
+    // Store duration for later use (0 = "Auto", the length of the marked range)
     t2aDuration = duration;
     
     // Disable button during operation
@@ -482,8 +523,8 @@ void PtV2AEditor::resized()
     const bool isSoundRec = currentWorkflowMode == WorkflowMode::SoundRecommendation;
     const bool isHybrid   = currentWorkflowMode == WorkflowMode::Hybrid;
     const int audioRows = (isAudioGen || isHybrid) ? 1 : 0;         // negative prompt, seed
-    const int hybridRows = isHybrid ? 3 : 0;                         // event switches, database switches, handles/scenes
-    const int spottingRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 1 : 0;   // scene switch
+    const int hybridRows = isHybrid ? 2 : 0;                         // memory locations + database; keep generated + handles
+    const int spottingRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 2 : 0;   // scenes/events, kinds
     const int promptRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 0 : 1;   // no prompt in Spotting
     const int toggleHeight = (isSoundRec && toggleSoundResultsButton.isVisible()) ? 28 : 0;
     const int resultsHeight = (isSoundRec && soundRecommendations.isVisible())
@@ -515,17 +556,15 @@ void PtV2AEditor::resized()
     // Layout components within contentComponent with 24px margin around edges
     auto r = contentComponent.getLocalBounds().reduced (24);
     
-    // Mode switch at the top: one block of three rows, label and (i) beside it
+    // Mode switch at the top: one block of three rows, the label beside it
     auto modeBlock = r.removeFromTop (3 * 28);
     modeLabel.setBounds (modeBlock.removeFromLeft (65).removeFromTop (28));
     modeBlock.removeFromLeft (10);
-    modeInfoButton.setBounds (modeBlock.removeFromRight (24).withSizeKeepingCentre (24, 24));   // the (i)
-    modeBlock.removeFromRight (8);
-    autoSpottingModeButton.setBounds (modeBlock.removeFromTop (28));
     auto leftColumn = modeBlock.removeFromLeft (modeBlock.getWidth() / 2);
-    audioGenModeButton.setBounds (leftColumn.removeFromTop (28));
-    soundRecModeButton.setBounds (leftColumn);
-    hybridModeButton.setBounds (modeBlock);   // spans both rows beside the two
+    autoSpottingModeButton.setBounds (leftColumn.removeFromTop (28));
+    soundRecModeButton.setBounds (leftColumn.removeFromTop (28));
+    audioGenModeButton.setBounds (leftColumn);
+    hybridModeButton.setBounds (modeBlock);   // spans the three rows beside the column
     
     // Prompt row (collapsed in Spotting, which has no text input)
     r.removeFromTop (20 * promptRows);
@@ -597,27 +636,36 @@ seedRow.removeFromLeft (20);
     memoryRow.removeFromLeft (75);
     useMemoryLocationsToggle.setBounds (memoryRow.removeFromLeft (230));
     memoryRow.removeFromLeft (20);
-    autoSpotToggle.setBounds (memoryRow);
+    useDatabaseSoundsToggle.setBounds (memoryRow);
     r.removeFromTop (isHybrid ? 20 : 0);
     auto databaseRow = r.removeFromTop (hybridRowHeight);
     databaseRow.removeFromLeft (75);
-    useDatabaseSoundsToggle.setBounds (databaseRow.removeFromLeft (230));
+    keepGeneratedToggle.setBounds (databaseRow.removeFromLeft (230));
     databaseRow.removeFromLeft (20);
-    keepGeneratedToggle.setBounds (databaseRow);
-    r.removeFromTop (isHybrid ? 20 : 0);
-    auto handlesRow = r.removeFromTop (hybridRowHeight);
-    handlesRow.removeFromLeft (75);
-    ambienceHandlesToggle.setBounds (handlesRow.removeFromLeft (230));
-    handlesRow.removeFromLeft (20);
-    if (isHybrid)
-        detectScenesToggle.setBounds (handlesRow);
+    ambienceHandlesToggle.setBounds (databaseRow.removeFromLeft (230));
+    databaseRow.removeFromLeft (20);
+    autoFadeToggle.setBounds (databaseRow);
     // Spotting: the scene switch alone under the backend row
     const bool isSpottingMode = currentWorkflowMode == WorkflowMode::AutoSpotting;
     r.removeFromTop (isSpottingMode ? 20 : 0);
     auto scenesRow = r.removeFromTop (isSpottingMode ? 28 : 0);
     scenesRow.removeFromLeft (75);
     if (isSpottingMode)
-        detectScenesToggle.setBounds (scenesRow);
+    {
+        detectScenesToggle.setBounds (scenesRow.removeFromLeft (230));
+        scenesRow.removeFromLeft (20);
+        detectEventsToggle.setBounds (scenesRow);
+        r.removeFromTop (20);
+        // Each kind gets the width its own text needs (box plus label), from the left edge
+        auto kindsRow = r.removeFromTop (28);
+        eventKindsLabel.setBounds ({});                 // the row above says what these are
+        const juce::Font kindsFont (14.0f);
+        for (auto* t : { &ambienceToggle, &foleyToggle, &sfxToggle, &musicToggle, &dialogueToggle })
+        {
+            const int wanted = kindsFont.getStringWidth (t->getButtonText()) + 34;
+            t->setBounds (kindsRow.removeFromLeft (juce::jmin (wanted, kindsRow.getWidth())));
+        }
+    }
 
 
     // 30px spacing before next row
@@ -1197,10 +1245,8 @@ void PtV2AEditor::timerCallback()
                                                                         : minutes (estimate) + " minutes")
                                 + " with a warm backend, more for the first clip.\n\n"
                                 + (scenesKnown ? "The scene memory locations in the session are used as they are.\n"
-                                               : detectScenesToggle.getToggleState()
-                                                     ? "Scenes are detected first; a spotting run with Detect scenes "
-                                                       "beforehand lets you correct them before this run.\n"
-                                                     : juce::String())
+                                               : "Scenes are detected first; a spotting run with Detect scenes "
+                                                 "beforehand lets you correct them before this run.\n")
                                 + "Pro Tools is busy while sounds are placed. The Stop button ends the run; "
                                   "what was placed stays, and the run can be continued later.";
             if (resumable)
@@ -1351,6 +1397,13 @@ void PtV2AEditor::timerCallback()
                     message += "; " + juce::String (dropped) + " extra library layer(s) left out (tracks per scene)";
                 if (dbPieces > 0)
                     message += "; " + juce::String (dbPlaced) + " of " + juce::String (dbPieces) + " library pieces placed";
+                if (const int fades = (int) json.getProperty ("fades_created", 0); fades > 0)
+                    message += "; " + juce::String (fades) + (fades == 1 ? " ambience clip" : " ambience clips")
+                               + " trimmed to the event and faded (preset \""
+                               + json.getProperty ("fade_preset", "").toString() + "\")";
+                else if (const int trimmed = (int) json.getProperty ("handles_trimmed", 0); trimmed > 0)
+                    message += "; " + juce::String (trimmed) + (trimmed == 1 ? " ambience clip" : " ambience clips")
+                               + " trimmed to the event (handles in the file)";
                 if (const int markers = (int) json.getProperty ("markers_created", 0); markers > 0)
                     message += "; " + juce::String (markers) + " memory locations for the events the backend found";
                 if (const int scenes = (int) json.getProperty ("scene_markers", 0); scenes > 0)
@@ -1646,6 +1699,37 @@ void PtV2AEditor::handleTimelineSelectionResult (const juce::String& output)
         if (isT2AMode)
         {
             juce::Logger::writeToLog ("=== T2A Mode: Starting text-only audio generation ===");
+            if (t2aDuration <= 0.0f)       // "Auto": the length of the marked range
+            {
+                const auto limits = currentAdapter();
+                const bool known = limits.isValid();
+                const double lo = known ? limits.minDuration : 4.0;
+                const double hi = known ? limits.maxDuration : 12.0;
+                const double preset = known ? limits.defaultDuration : 8.0;
+                const juce::String range = known ? limits.durationRange()
+                                                 : juce::String ("4-12 s");
+                if (durationSeconds < 0.05f)                     // a cursor, no range
+                {
+                    t2aDuration = (float) preset;
+                    juce::Logger::writeToLog ("No range marked: using the backend's default length");
+                }
+                else if (durationSeconds > hi + 0.05f)
+                {
+                    juce::Logger::writeToLog ("Selection too long for the backend: "
+                                              + juce::String (durationSeconds, 1) + "s > " + juce::String (hi, 1) + "s");
+                    showStatus ("The selection is " + juce::String (durationSeconds, 1) + " s long, "
+                                + (known ? limits.name : juce::String ("the backend")) + " generates " + range
+                                + ". Mark a shorter range or pick a length from the Duration list.", true);
+                    actionButton.setEnabled (true);
+                    actionButton.setButtonText ("Generate Sound");
+                    currentAsyncState = AsyncState::Idle;
+                    return;
+                }
+                else
+                    t2aDuration = (float) juce::jmax (lo, (double) durationSeconds);   // short ranges: the minimum
+                juce::Logger::writeToLog ("Duration from the selection: " + juce::String (durationSeconds, 2)
+                                          + "s -> " + juce::String (t2aDuration, 1) + "s (" + range + ")");
+            }
             juce::Logger::writeToLog ("Duration: " + juce::String (t2aDuration, 1) + "s");
             juce::Logger::writeToLog ("Import position: " + inTime + " (" + juce::String (inSeconds, 2) + "s)");
             juce::Logger::writeToLog ("Prompt: " + prompt.getText());
@@ -2513,11 +2597,6 @@ juce::String PtV2AEditor::modeDescription (WorkflowMode mode) const
     }
 }
 
-void PtV2AEditor::updateModeInfo()
-{
-    modeInfoButton.setTooltip (modeDescription (currentWorkflowMode));
-}
-
 void PtV2AEditor::resetActionUi()
 {
     actionButton.setEnabled (true);
@@ -2622,7 +2701,6 @@ void PtV2AEditor::handleWorkflowModeChange()
     // text, and its reset picks the idle text of whatever mode is current by then.
     if (actionButton.isEnabled())
         actionButton.setButtonText (idleActionButtonText());
-    updateModeInfo();
     
     // Show/hide fields based on workflow mode
     // Prompt is visible in Audio Gen and Sound Rec, hidden in Auto Spotting
@@ -2640,11 +2718,15 @@ void PtV2AEditor::handleWorkflowModeChange()
     seedInput.setVisible (isAudioGen || isHybrid);
     seedLabel.setVisible (isAudioGen || isHybrid);
     useMemoryLocationsToggle.setVisible (isHybrid);
-    autoSpotToggle.setVisible (isHybrid);
     useDatabaseSoundsToggle.setVisible (isHybrid);
     keepGeneratedToggle.setVisible (isHybrid);
     ambienceHandlesToggle.setVisible (isHybrid);
-    detectScenesToggle.setVisible (isHybrid || currentWorkflowMode == WorkflowMode::AutoSpotting);
+    autoFadeToggle.setVisible (isHybrid);
+    detectScenesToggle.setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting);
+    detectEventsToggle.setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting);
+    eventKindsLabel.setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting);
+    for (auto* t : { &dialogueToggle, &foleyToggle, &sfxToggle, &ambienceToggle, &musicToggle })
+        t->setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting);
     
     // V2A/T2A toggle only visible in Sound Generation (not used in Sound Recommendation)
     // Sound Search automatically tries video detection first, then falls back to text-only
@@ -2750,7 +2832,6 @@ void PtV2AEditor::applyAdapterCapabilities()
         useMemoryLocationsToggle.setEnabled (memory);
         if (! memory)
             useMemoryLocationsToggle.setToggleState (false, juce::dontSendNotification);
-        autoSpotToggle.setEnabled (memory && useMemoryLocationsToggle.getToggleState());
         // Database sounds: the profile must claim it, and the backend's health must confirm it
         // (search service reachable, audio index present); asked in the background.
         const bool claimed = ! known || adapter.supportsFeature ("database_match");
@@ -2762,30 +2843,31 @@ void PtV2AEditor::applyAdapterCapabilities()
         return;
     }
     t2aModeButton.setEnabled (textOnly);
-    t2aModeButton.setTooltip (textOnly ? juce::String() : adapter.name + " needs a video");
+    t2aModeButton.setTooltip (textOnly ? juce::String ("Text-to-audio: the sound is generated from the prompt alone, "
+                                                        "as long as the marked range (Duration: Auto) or a fixed length, "
+                                                        "and placed at the start of the range.")
+                                       : adapter.name + " needs a video");
 
-    // T2A lengths: whole seconds between the profile's min and max (4-12 s when unknown),
-    // the profile's default preselected, a still-valid earlier choice kept.
+    // T2A lengths: "Auto" (the marked range, the default) first, then whole seconds
+    // between the profile's min and max (4-12 s when unknown); a still-valid earlier
+    // fixed choice is kept.
     const double lo = known ? adapter.minDuration : 4.0;
     const double hi = known ? adapter.maxDuration : 12.0;
-    const double preset = known ? adapter.defaultDuration : 8.0;
-    const double previous = durationComboBox.getText().dropLastCharacters (1).getDoubleValue();
+    const bool previousWasSelection = durationComboBox.getSelectedId() == 1 || durationComboBox.getNumItems() == 0;
+    const double previous = previousWasSelection ? 0.0
+                                                 : durationComboBox.getText().dropLastCharacters (1).getDoubleValue();
     const int step = juce::jmax (1, (int) std::ceil ((hi - lo) / 40.0));    // never more than ~40 items
     durationComboBox.clear (juce::dontSendNotification);
-    int id = 0, selected = 0, nearestDefault = 0;
-    double nearestGap = 1.0e9;
+    int id = 0, selected = 0;
+    durationComboBox.addItem ("Auto", ++id);
     for (double s = std::ceil (lo); s <= hi + 1.0e-9; s += step)
     {
         durationComboBox.addItem (juce::String ((int) s) + "s", ++id);
         if (previous > 0.0 && std::abs (s - previous) < 1.0e-6) selected = id;
-        if (std::abs (s - preset) < nearestGap) { nearestGap = std::abs (s - preset); nearestDefault = id; }
     }
-    if (id == 0)      // range narrower than a second: offer the maximum
-    {
+    if (id == 1)      // range narrower than a second: offer the maximum as the one fixed length
         durationComboBox.addItem (juce::String (hi, 1) + "s", ++id);
-        nearestDefault = id;
-    }
-    durationComboBox.setSelectedId (selected > 0 ? selected : nearestDefault, juce::dontSendNotification);
+    durationComboBox.setSelectedId (selected > 0 ? selected : 1, juce::dontSendNotification);
 }
 
 void PtV2AEditor::refreshBackendAvailability()
@@ -2835,7 +2917,24 @@ void PtV2AEditor::refreshBackendAvailability()
         {
             if (safeThis == nullptr || request != safeThis->availabilityRequest)
                 return;                                    // a newer probe superseded this one
-            safeThis->backendAvailability = results;
+            // A backend that is busy (generating, matching) may miss one probe; only two
+            // misses in a row grey a mode out, and a mode whose script is running is never
+            // greyed by its own load.
+            auto merged = results;
+            for (auto& [kind, state] : merged)
+            {
+                const auto previous = safeThis->backendAvailability.find (kind);
+                const bool previouslyAvailable = previous == safeThis->backendAvailability.end() || previous->second.available;
+                const bool running = safeThis->currentAsyncState != AsyncState::Idle;
+                if (! state.available && (previouslyAvailable || running) && ! state.reason.startsWith ("no "))
+                {
+                    juce::Logger::writeToLog ("Backend probe missed (" + kind + "): " + state.reason
+                                              + (running ? " - a run is active, kept available" : " - kept until the next probe"));
+                    state.available = true;
+                    state.missed = true;
+                }
+            }
+            safeThis->backendAvailability = merged;
             safeThis->applyBackendAvailability();
             juce::Timer::callAfterDelay (30000, [safeThis, request]
             {
@@ -2876,6 +2975,8 @@ void PtV2AEditor::applyHybridMatchAvailability()
         : "Not available: " + hybridMatchReason);
     keepGeneratedToggle.setEnabled (hybridMatchAvailable && useDatabaseSoundsToggle.getToggleState());
     ambienceHandlesToggle.setEnabled (hybridMatchAvailable && useDatabaseSoundsToggle.getToggleState());
+    autoFadeToggle.setEnabled (hybridMatchAvailable && useDatabaseSoundsToggle.getToggleState()
+                               && ambienceHandlesToggle.getToggleState());
 }
 
 void PtV2AEditor::refreshHybridBackendHealth()
@@ -3776,11 +3877,7 @@ void PtV2AEditor::startHybrid (bool wholeTrack, bool resume, bool estimate)
     args.add ("--seed");
     args.add (juce::String (seedInput.getText().trim().isEmpty() ? -1 : seedInput.getText().trim().getIntValue()));
     if (useMemoryLocationsToggle.getToggleState() && useMemoryLocationsToggle.isEnabled())
-    {
         args.add ("--use-memory-locations");
-        if (! autoSpotToggle.getToggleState())
-            args.add ("--no-auto-spot");
-    }
     if (useDatabaseSoundsToggle.getToggleState() && useDatabaseSoundsToggle.isEnabled())
     {
         args.add ("--use-database");
@@ -3788,9 +3885,19 @@ void PtV2AEditor::startHybrid (bool wholeTrack, bool resume, bool estimate)
             args.add ("--keep-generated");
         if (! ambienceHandlesToggle.getToggleState())
             args.add ("--no-handles");
+        else if (autoFadeToggle.getToggleState())
+        {
+            args.add ("--fade-handles");
+            if (const auto preset = currentAdapter().fadePreset.trim(); preset.isNotEmpty())
+            {
+                args.add ("--fade-preset");
+                args.add (preset);
+            }
+            args.add ("--fade-seconds");
+            args.add (juce::String (currentAdapter().fadeSeconds, 2));
+        }
     }
-    if (detectScenesToggle.getToggleState())
-        args.add ("--scenes");
+    args.add ("--scenes");      // always per scene: the session's scene memory locations, else detected
 
     juce::Logger::writeToLog ("Hybrid command: " + args.joinIntoString (" "));
 
@@ -3841,6 +3948,22 @@ void PtV2AEditor::startSpotting (bool wholeTrack)
     args.add (wholeTrack ? "--whole-track" : "--from-selection");
     if (detectScenesToggle.getToggleState())
         args.add ("--scenes");
+    if (! detectEventsToggle.getToggleState())
+        args.add ("--no-events");
+    else
+    {
+        juce::StringArray kinds;
+        if (dialogueToggle.getToggleState()) kinds.add ("dialogue");
+        if (foleyToggle.getToggleState())    kinds.add ("foley");
+        if (sfxToggle.getToggleState())      kinds.add ("sfx");
+        if (ambienceToggle.getToggleState()) kinds.add ("ambience");
+        if (musicToggle.getToggleState())    kinds.add ("music");
+        if (kinds.size() > 0 && kinds.size() < 5)
+        {
+            args.add ("--categories");
+            args.add (kinds.joinIntoString (","));
+        }
+    }
     args.add ("--progress-file");
     args.add (spottingProgressFile.getFullPathName());
 
@@ -3899,10 +4022,15 @@ void PtV2AEditor::updateSpottingProgress()
     juce::String detail = doc.getProperty ("detail", "").toString();
     bool working = stage == "cutting" || stage == "spotting" || stage == "generating";
 
-    // Within the current clip, the backend may say how far it is (model calls done)
+    // Within the current clip (or the scene detection), the backend may say how far it is
     const juce::var fractionVar = doc.getProperty ("fraction", juce::var());
-    const bool hasFraction = working && (fractionVar.isDouble() || fractionVar.isInt());
+    const bool hasFraction = (working || stage == "detecting scenes") && (fractionVar.isDouble() || fractionVar.isInt());
     const double fraction = hasFraction ? juce::jlimit (0.0, 1.0, (double) fractionVar) : 0.0;
+
+    // The script may say how much of the whole run is done, scene detection and placing
+    // included; then the bar follows that instead of counting clips
+    const juce::var overallVar = doc.getProperty ("overall", juce::var());
+    const bool hasOverall = overallVar.isDouble() || overallVar.isInt();
 
     // The script is alive, so the timeout window starts afresh; the elapsed seconds on
     // the button keep counting from the real start.
@@ -3912,6 +4040,7 @@ void PtV2AEditor::updateSpottingProgress()
     // says it is done; busy animation only while a single clip's backend reports nothing.
     const bool done = (bool) doc.getProperty ("done", false);
     progressValue = done ? 1.0
+                  : hasOverall ? juce::jlimit (0.0, 1.0, (double) overallVar)
                   : total > 0 && (total > 1 || hasFraction || ! working)
                         ? juce::jlimit (0.0, 1.0, (current - (working ? 1.0 : 0.0) + fraction) / total)
                         : -1.0;
