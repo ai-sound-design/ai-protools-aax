@@ -152,12 +152,18 @@ foreach ($package in $REQUIREMENTS) {
     Invoke-Native $PYTHON_EXE @("-m", "pip", "install", "--no-cache-dir", $package) | Out-Null
 }
 
-# Install py-ptsl (editable mode for development)
+# Install py-ptsl: the pinned submodule external/py-ptsl, as a real copy. Never editable
+# (that only leaves a path link to this checkout, and the plugin fails on every other
+# machine) and never from upstream git (a different version).
 Write-Host ""
-Write-Host "Installing py-ptsl (editable)..." -ForegroundColor Cyan
+Write-Host "Installing py-ptsl..." -ForegroundColor Cyan
 $PY_PTSL_DIR = Join-Path $SCRIPT_DIR "..\external\py-ptsl"
-if (Test-Path $PY_PTSL_DIR) {
-    Invoke-Native $PYTHON_EXE @("-m", "pip", "install", "-e", $PY_PTSL_DIR) | Out-Null
+if (-not (Test-Path (Join-Path $PY_PTSL_DIR "pyproject.toml"))) {
+    Write-Host "py-ptsl submodule not checked out, fetching it..." -ForegroundColor Yellow
+    git -C (Join-Path $SCRIPT_DIR "..") submodule update --init external/py-ptsl
+}
+if (Test-Path (Join-Path $PY_PTSL_DIR "pyproject.toml")) {
+    Invoke-Native $PYTHON_EXE @("-m", "pip", "install", "--no-cache-dir", $PY_PTSL_DIR) | Out-Null
     Write-Host "[OK] py-ptsl installed" -ForegroundColor Green
 } else {
     Write-Host "[WARN] py-ptsl not found at: $PY_PTSL_DIR" -ForegroundColor Yellow

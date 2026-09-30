@@ -118,17 +118,22 @@ for package in "${REQUIREMENTS[@]}"; do
     "$PYTHON_EXE" -m pip install --no-cache-dir "$package"
 done
 
-# Install py-ptsl (editable mode for development)
+# Install py-ptsl: the pinned submodule external/py-ptsl, as a real copy. Never
+# editable (that only leaves a path link to this checkout, and the plugin fails on
+# every other machine) and never from upstream git (a different version).
 echo ""
-echo "Installing py-ptsl (editable)..."
-PY_PTSL_DIR="${SCRIPT_DIR}/../../../external/py-ptsl"
-if [ -d "$PY_PTSL_DIR" ]; then
-    "$PYTHON_EXE" -m pip install -e "$PY_PTSL_DIR"
-    echo "✓ py-ptsl installed"
+echo "Installing py-ptsl..."
+PY_PTSL_DIR="${SCRIPT_DIR}/../external/py-ptsl"
+if [ ! -f "$PY_PTSL_DIR/pyproject.toml" ]; then
+    echo "py-ptsl submodule not checked out, fetching it..."
+    git -C "${SCRIPT_DIR}/.." submodule update --init external/py-ptsl
+fi
+if [ -f "$PY_PTSL_DIR/pyproject.toml" ]; then
+    "$PYTHON_EXE" -m pip install --no-cache-dir "$PY_PTSL_DIR"
+    echo "✓ py-ptsl installed from $PY_PTSL_DIR"
 else
-    echo "⚠ py-ptsl not found at: $PY_PTSL_DIR"
-    echo "Installing from git..."
-    "$PYTHON_EXE" -m pip install git+https://github.com/iluvcapra/py-ptsl.git
+    echo "✗ py-ptsl not found at: $PY_PTSL_DIR (run: git submodule update --init external/py-ptsl)"
+    exit 1
 fi
 
 # Verify installations
