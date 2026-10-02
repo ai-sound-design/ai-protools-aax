@@ -14,18 +14,21 @@ Where the events come from is the backend's business: with
 --use-memory-locations the memory locations inside the range are sent along
 (the result of a spotting run, or markers the user set by hand) and scene
 markers are the scenes; a clip without events is spotted by the backend and
-scenes without markers are detected. Otherwise the backend finds everything
-itself. With --use-database the backend also answers
+scenes without markers are detected (--no-auto-spot skips such a clip instead).
+Otherwise the backend finds everything itself, kept to the kinds in
+--categories. --replace-earlier clears the range on every hybrid track
+("(gen)", "(db)") first, so a repeated run does not pile clips on the old ones. With --use-database the backend also answers
 library recordings that sound like each generated sound, as pieces in time
 (stitched, at most "pieces_per_10s" of the profile's match block) and layers;
 they replace the generated sound (which stays only where nothing matched), or
 go on a track under it with --keep-generated. An ambience piece comes with
 "ambience_handle_seconds" of its recording before and after the matched stretch;
 the clip is trimmed to the event, so the handles stay in the file to be pulled
-out with the Trim tool. --fade-handles keeps --fade-seconds of the handle outside
-the event on each side and gives the clip Pro Tools' own fades over that stretch,
-from the batch-fades preset --fade-preset; --no-handles cuts the piece to the
-event instead. With --scenes
+out with the Trim tool. --fade-handles gives the clip Pro Tools' own fades from
+the batch-fades preset --fade-preset: the clip keeps --fade-seconds of the handle
+outside the event on each side for the fade to run over, or, with --fade-inside,
+ends at the event and the fade runs within it (as at a cut); --no-handles cuts
+the piece to the event instead. With --scenes
 the clips of the range are grouped into scenes first (one memory location per
 scene). The contract is described in the backend repository (hybrid/README.md)
 and in api/adapters.py.
@@ -56,6 +59,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import tempfile
 import time
@@ -68,13 +72,10 @@ from spotting_client import (Progress, RunShare, cut_range, cut_segments, log, s
                              place_markers, scene_markers)
 from api.adapters import (hybrid_with_profile, load_profile, match_settings, scenes_with_profile,   # noqa: E402
                           selected_profile)
+from ptsl_integration.clip_finish import finish_clip, seconds_to_tc   # noqa: E402
 
 
-def seconds_to_tc(seconds: float, fps: float) -> str:
-    frames_total = int(round(seconds * fps))
-    frames = frames_total % int(round(fps))
-    whole = frames_total // int(round(fps))
-    return f"{whole // 3600:02d}:{(whole % 3600) // 60:02d}:{whole % 60:02d}:{frames:02d}"
+SCENE_MARK = re.compile(r"^Scene \d+\s*:")
 
 
 def memory_locations_in(engine, seg: Dict, sample_rate: int) -> List[dict]:
@@ -88,6 +89,8 @@ def memory_locations_in(engine, seg: Dict, sample_rate: int) -> List[dict]:
             continue
         if not (seg["in_seconds"] <= start < seg["out_seconds"]):
             continue
+        if SCENE_MARK.match(str(m.name or "")):
+            continue   # a scene marker ("Scene 2: Kitchen"), not a sound event
         comment = str(getattr(m, "comments", "") or "")
         category = comment.split(":", 1)[0].strip().lower() if ":" in comment else ""
         events.append({
@@ -210,7 +213,7 @@ def estimate_run(resolved: dict, args, scenes_known: bool, journal: dict) -> dic
         est += 20.0 * max(0, len(segments) - 1) + 20.0 * max(1, len(segments) // 3)
     if not (args.use_memory_locations and args.no_auto_spot):
         est += seconds * 6.0                                # spotting: about a minute per ten seconds
-    est += events * 35.0                                    # generation per event
+    est += max(events, seconds / 11.0) * 35.0               # generation: about 35 s per 12 s window
     if args.use_database:
         est += events * 12.0                                # library search per event
     est += len(segments) * 8.0 + events * 4.0               # cutting, downloads, placement
@@ -241,49 +244,27 @@ def trim_head(path: str, seconds: float) -> str:
         return path
 
 
-def finish_clip(engine_factory, track: str, start: float, end: float, before: float, after: float, fps: float,
-                preset: Optional[str], fade: float = 0.0) -> Tuple[bool, bool]:
-    """The clip just imported on `track` (with its handles) trimmed to the event
-    `start`..`end` (seconds), so the handles stay in the file and can be pulled out
-    with the Trim tool. With a batch-fades `preset`, the clip keeps `fade` seconds of
-    its handle outside the event on each side that has one (a fade-in side when
-    `before` > 0, a fade-out side when `after` > 0) and Pro Tools' own fade runs over
-    that stretch, so the sound is at full level at the event's edges:
-
-        ....|  event  |....        handles in the file
-        fade|  sound  |fade        the clip on the timeline
-
-    The batch-fade range covers only the edge in question, so the seam to the next
-    piece of the same ambience gets no fade. The edit selection has to be put on the
-    track through a clip selection first (a track selection alone does not make one).
-    Returns (trimmed, faded)."""
-    trimmed = faded = False
-    frame = 1.0 / max(1.0, fps)
-    lead = min(fade, before) if preset and before > 0.0 else 0.0      # the handle kept before the event
-    tail = min(fade, after) if preset and after > 0.0 else 0.0        # ... and after it
-    clip_start, clip_end = start - lead, end + tail
-    reach = min(0.5, max(0.0, clip_end - clip_start) / 2.0)          # into the clip, at most half of it
+def clear_hybrid_range(engine_factory, segments: List[dict], fps: float) -> int:
+    """Clear the range of every segment on the tracks of earlier hybrid runs (names ending
+    in "(gen)" or "(db)"), so a repeated run replaces their clips instead of stacking new
+    ones on top. Returns the number of tracks cleared. The edit selection has to be put
+    on a track through a clip selection first, then narrowed to the range."""
+    cleared = 0
+    tracks = sorted(t for t in track_names(engine_factory) if t.endswith(" (gen)") or t.endswith(" (db)"))
+    if not tracks:
+        return 0
     try:
         with engine_factory() as engine:
-            engine.select_all_clips_on_track(track)
-            engine.set_timeline_selection(in_time=seconds_to_tc(max(0.0, clip_start), fps),
-                                          out_time=seconds_to_tc(clip_end, fps))
-            engine.trim_to_selection()
-            trimmed = True
-            for edge, wanted in (("in", lead > 0.0), ("out", tail > 0.0)):
-                if not preset or not wanted:
-                    continue
-                if edge == "in":     # a frame before the edge (our own handle room, when there is any) to a little inside
-                    lo, hi = clip_start - (frame if before - lead >= frame else 0.0), clip_start + reach
-                else:
-                    lo, hi = clip_end - reach, clip_end + (frame if after - tail >= frame else 0.0)
-                engine.select_all_clips_on_track(track)
-                engine.set_timeline_selection(in_time=seconds_to_tc(max(0.0, lo), fps), out_time=seconds_to_tc(hi, fps))
-                engine.create_batch_fades(preset, False)
-                faded = True
+            for track in tracks:
+                for seg in segments:
+                    engine.select_all_clips_on_track(track)
+                    engine.set_timeline_selection(in_time=seg["in_time"], out_time=seg["out_time"])
+                    engine.clear()
+                cleared += 1
     except Exception as exc:  # noqa: BLE001
-        log(f"    {'fades' if trimmed else 'trim'} on '{track}' failed: {str(exc)[:160]}")
-    return trimmed, faded
+        log(f"clearing earlier hybrid clips failed on '{track}': {str(exc)[:160]}")
+    log(f"{cleared} hybrid track(s) cleared in the range: {', '.join(tracks[:6])}{', ...' if len(tracks) > 6 else ''}")
+    return cleared
 
 
 def lane_name(scene_name: str, lane: int, kind: str) -> str:
@@ -294,11 +275,15 @@ def lane_name(scene_name: str, lane: int, kind: str) -> str:
 
 def assign_lanes(items: List[dict], budget: int) -> Tuple[int, List[dict]]:
     """Give the items of one scene their lanes (tracks). An item is a generated sound or
-    one layer of library pieces, with its span on the timeline; items that do not
-    overlap share a lane. Items that must be placed (priority 0: the generated sound,
-    or the first library layer when it replaces it) always get a lane, beyond the
+    one layer of library pieces, with its span on the timeline. Every sound gets a lane
+    of its own while the budget allows (rain followed by an engine on one track would
+    read as one sound with a gap); pieces of the same sound share theirs. Only when the
+    budget is used up do different sounds share a lane where they do not overlap, a
+    lane of the same category first. Items that must be placed (priority 0: the generated sound
+    and the first library layer) always get a lane, beyond the
     budget if that many overlap; further layers (priority = layer) only where a lane
-    within the budget is free, best similarity first. A lane holds one kind only,
+    within the budget is free, best similarity first. The budget counts per kind, so
+    with the generated sounds kept each event has both. A lane holds one kind only,
     "gen" or "db": mono and stereo clips cannot share a track, and the track name
     says what is on it. Returns the number of lanes used and the items left out."""
     lanes: List[dict] = []
@@ -307,21 +292,58 @@ def assign_lanes(items: List[dict], budget: int) -> Tuple[int, List[dict]]:
         return lane["kind"] == item["kind"] and all(item["end"] <= s or item["start"] >= e
                                                     for s, e in lane["intervals"])
 
+    def label(item: dict) -> str:
+        return str((item.get("sound") or {}).get("label") or item.get("label") or "").strip().lower()
+
+    def room(item: dict) -> bool:
+        # The budget counts per kind: with the generated sounds kept, they and the
+        # library pieces each get `budget` tracks, instead of the generated ones
+        # taking all of them and every library piece being left out.
+        return sum(1 for l in lanes if l["kind"] == item["kind"]) < budget
+
+    def pick(item: dict) -> Optional[int]:
+        fitting = [i for i, l in enumerate(lanes) if free(l, item)]
+        same = [i for i in fitting if label(item) and label(item) in lanes[i]["labels"]]
+        if same:
+            return same[0]
+        if room(item):
+            return None   # a new lane of its own
+        related = [i for i in fitting if item.get("category") and item.get("category") in lanes[i]["categories"]]
+        return (related or fitting or [None])[0]
+
     dropped: List[dict] = []
     order = sorted(items, key=lambda it: (it["priority"], -float(it.get("similarity", 1.0)),
                                           0 if it.get("category") == "ambience" else 1, it["start"]))
     for item in order:
-        lane = next((i for i, l in enumerate(lanes) if free(l, item)), None)
+        lane = pick(item)
         if lane is None:
-            if len(lanes) < budget or item["priority"] == 0:
-                lanes.append({"kind": item["kind"], "intervals": []})
+            if room(item) or item["priority"] == 0:
+                lanes.append({"kind": item["kind"], "intervals": [], "labels": set(), "categories": set()})
                 lane = len(lanes) - 1
             else:
                 item["lane"] = None
                 dropped.append(item)
                 continue
         lanes[lane]["intervals"].append((item["start"], item["end"]))
+        lanes[lane]["labels"].add(label(item))
+        lanes[lane]["categories"].add(item.get("category"))
         item["lane"] = lane + 1
+    # Track order: with the generated sounds kept, each generated lane is followed by the
+    # library lane of the same sound, so the two versions of an event lie one above the
+    # other (instead of all generated tracks first and all library tracks after them).
+    order_of: List[int] = []
+    for i, l in enumerate(lanes):
+        if l["kind"] != "gen":
+            continue
+        order_of.append(i)
+        for j, other in enumerate(lanes):
+            if other["kind"] != "gen" and j not in order_of and other["labels"] & l["labels"]:
+                order_of.append(j)
+    order_of += [j for j in range(len(lanes)) if j not in order_of]
+    number = {old: new + 1 for new, old in enumerate(order_of)}
+    for item in items:
+        if item.get("lane"):
+            item["lane"] = number[item["lane"] - 1]
     return len(lanes), dropped
 
 
@@ -354,10 +376,19 @@ def place_lanes(scene_name: str, items: List[dict], args, engine_factory, import
                 before = track_names(engine_factory)
                 ok = import_audio(c["path"], timecode=c["tc"], clip_name=c["name"],
                                   host=args.ptsl_host, port=args.ptsl_port)
+                # Pro Tools lists the new track a moment after the import answers; asking
+                # too early found nothing, and the lane kept the clip's name
                 new = track_names(engine_factory) - before
+                for _ in range(15):
+                    if new:
+                        break
+                    time.sleep(0.2)
+                    new = track_names(engine_factory) - before
                 if len(new) == 1:
                     track = rename_track(engine_factory, next(iter(new)), name)
                     existing.add(track)
+                elif ok:
+                    log(f"    new track for {c['name']} not found after the import; lane name not applied")
             else:
                 ok = import_audio(c["path"], timecode=c["tc"], clip_name=c["name"], track_name=track,
                                   host=args.ptsl_host, port=args.ptsl_port)
@@ -370,7 +401,8 @@ def place_lanes(scene_name: str, items: List[dict], args, engine_factory, import
                 c["fade_wanted"] = bool(preset)
                 c["trimmed"], c["faded"] = finish_clip(engine_factory, track or name, c["event_start"], c["event_end"],
                                                        c["before"], c["after"], c["fps"], preset,
-                                                       max(0.0, float(getattr(args, "fade_seconds", 1.0) or 0.0)))
+                                                       max(0.0, float(getattr(args, "fade_seconds", 1.0) or 0.0)),
+                                                       bool(getattr(args, "fade_inside", False)), log=log)
             if ok and on_placed:
                 on_placed(c)
             log(f"    {c['tc']}  {track or name}: {c['name']}"
@@ -403,7 +435,8 @@ def run(args, progress: Progress, engine_factory) -> dict:
 
     progress.update(0, 0, "", "reading selection")
     with engine_factory() as engine:
-        resolved = resolve_video_segments(engine, whole_track=args.whole_track, log=log)
+        resolved = resolve_video_segments(engine, whole_track=args.whole_track,
+                                          track_name=getattr(args, "video_track", None) or None, log=log)
         if not resolved.get("success"):
             raise RuntimeError(resolved.get("error", "could not resolve the video range"))
         sample_rate = resolved.get("sample_rate") or engine.session_sample_rate() or 48000
@@ -456,7 +489,7 @@ def run(args, progress: Progress, engine_factory) -> dict:
                                         on_progress=lambda p: progress.update(0, total, "", "detecting scenes",
                                                                               fraction=p.get("fraction"),
                                                                               detail=p.get("detail", ""),
-                                                                              overall=share.scenes(p.get("fraction"))))
+                                                                              overall=share.scenes(max(0.05, p.get("fraction")))))
             scenes = found.get("scenes", [])
             scene_of = {seg["index"]: int(k) for seg, k in zip(segments, found.get("clip_scenes", []))}
             log(f"{len(scenes)} scene(s): " + "; ".join(f"{s.get('index')}: {s.get('name')}" for s in scenes))
@@ -512,6 +545,7 @@ def run(args, progress: Progress, engine_factory) -> dict:
                     prompt=args.prompt or "", negative_prompt=args.negative_prompt or "", seed=args.seed,
                     events=events,
                     output_dir=str(out_dir), log=log, match=match,
+                    categories=(getattr(args, "categories", "") or "") if events is None else None,
                     on_progress=lambda p, i=i, clip=clip, eta=eta: progress.update(
                         i, total, clip, "generating", fraction=p.get("fraction"), detail=p.get("detail", ""),
                         eta_seconds=eta, overall=share.clip(i, p.get("fraction"))))
@@ -585,7 +619,7 @@ def run(args, progress: Progress, engine_factory) -> dict:
                                   "id": f"{seg['index']}:{n}:db:{layer}:{len(clips) + 1}",
                                   "name": (p.get("description") or p.get("external_id") or "library sound")[:31],
                                   "similarity": float(p.get("similarity", 0.0)), "piece": p})
-                scene_items.append({"kind": "db", "priority": 0 if (layer == 1 and replace) else layer,
+                scene_items.append({"kind": "db", "priority": 0 if layer == 1 else layer,
                                     "category": sound.get("category"), "label": name, "layer": layer,
                                     "similarity": sum(c["similarity"] for c in clips) / len(clips),
                                     "start": min(c["start"] for c in clips), "end": max(c["end"] for c in clips),
@@ -600,6 +634,11 @@ def run(args, progress: Progress, engine_factory) -> dict:
     # clips sharing a track, extra library layers only where a lane is free.
     budget = max(1, int(match_settings(profile).get("tracks_per_scene", 8)))
     tracks_used = dropped_layers = 0
+    tracks_cleared = 0
+    if getattr(args, "replace_earlier", False) and items and not args.dry_run:
+        progress.update(total, total, "", "placing", detail="clearing earlier hybrid clips",
+                        overall=share.placing(0.0))
+        tracks_cleared = clear_hybrid_range(engine_factory, segments, fps)
     handles_trimmed = fades_created = fades_wanted = 0
     scene_count = len(items)
     for k, (scene_index, scene_items) in enumerate(sorted(items.items()), start=1):
@@ -637,12 +676,22 @@ def run(args, progress: Progress, engine_factory) -> dict:
                     if item["priority"] == 0:
                         item["sound"]["placed"] = True
     placed = sum(1 for snd in all_sounds if snd.get("placed"))
+    if fades_wanted and segments and not args.dry_run:
+        # The last fade's edit selection would stay on its track and look like part of
+        # the clip; a cursor at the range's start leaves nothing selected.
+        try:
+            with engine_factory() as engine:
+                at = segments[0]["in_time"]
+                engine.set_timeline_selection(in_time=at, out_time=at)
+        except Exception:  # noqa: BLE001  (only cosmetic)
+            pass
 
     progress.update(total, total, "", "done", done=True)
     return {"success": placed > 0 or (args.dry_run and bool(all_sounds)),
             "sounds": all_sounds, "placed": placed, "segments": total, "clips": per_clip,
             "db_pieces": db_pieces, "db_placed": db_placed, "replaced": replace,
             "tracks_used": tracks_used, "tracks_per_scene": budget, "dropped_layers": dropped_layers,
+            "tracks_cleared": tracks_cleared,
             "handles_trimmed": handles_trimmed, "fades_created": fades_created, "fades_wanted": fades_wanted,
             "fade_preset": getattr(args, "fade_preset", ""),
             "markers_created": markers_created, "scenes": scenes, "scene_markers": scene_markers_created,
@@ -662,8 +711,15 @@ def main() -> int:
                         help="send the memory locations inside the range as the sound events")
     parser.add_argument("--no-auto-spot", action="store_true",
                         help="with --use-memory-locations: skip a clip that has none instead of letting the backend spot it")
+    parser.add_argument("--categories", default="",
+                        help="comma-separated kinds of events the backend's spotting keeps (dialogue, foley, sfx, "
+                             "ambience, music); clips with memory locations are not affected")
+    parser.add_argument("--replace-earlier", action="store_true",
+                        help="clear the range on the tracks of earlier hybrid runs ('(gen)', '(db)') before placing")
     parser.add_argument("--use-database", action="store_true",
                         help="also place library recordings that sound like each generated sound (profile 'match' block)")
+    parser.add_argument("--video-track", default=None,
+                        help="the video track to map the range onto (default: the topmost, or the one the selection lies on)")
     parser.add_argument("--keep-generated", action="store_true",
                         help="with --use-database: place the generated sound too, on its own track above the pieces")
     parser.add_argument("--no-handles", action="store_true",
@@ -677,6 +733,9 @@ def main() -> int:
     parser.add_argument("--fade-seconds", type=float, default=1.0,
                         help="with --fade-handles: how much of its handle a clip keeps outside the event on each "
                              "side, for the fade to run over (the preset's fade length; default 1)")
+    parser.add_argument("--fade-inside", action="store_true",
+                        help="with --fade-handles: the clip ends at the event and the fade runs within it "
+                             "(as at a cut) instead of over the handle outside")
     parser.add_argument("--scenes", action="store_true",
                         help="group the clips of the range into scenes first and place one memory location per scene")
     parser.add_argument("--estimate", action="store_true",

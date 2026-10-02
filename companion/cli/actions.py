@@ -138,9 +138,16 @@ def action_import_audio(
     track_name: Optional[str] = None,
     clip_name: Optional[str] = None,
     timecode_out: Optional[str] = None,
+    cut: bool = False,
+    handle_before: float = 0.0,
+    fade_preset: Optional[str] = None,
+    fade_seconds: float = 1.0,
+    fade_inside: bool = False,
 ) -> Dict[str, Any]:
     """
-    Import audio file to Pro Tools timeline.
+    Import audio file to Pro Tools timeline. With `cut` the clip is trimmed to the
+    selection (timecode..timecode_out), `handle_before` seconds of the file lie before
+    it, and `fade_preset` gives it Pro Tools' own fades (see ptsl_integration.clip_finish).
     
     Args:
         audio_path: Path to audio file to import
@@ -177,6 +184,11 @@ def action_import_audio(
             track_name=track_name,
             clip_name=clip_name,
             timecode_out=timecode_out,
+            cut=cut,
+            handle_before=handle_before,
+            fade_preset=fade_preset,
+            fade_seconds=fade_seconds,
+            fade_inside=fade_inside,
         )
 
         result = {

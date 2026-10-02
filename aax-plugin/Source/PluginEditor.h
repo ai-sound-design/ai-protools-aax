@@ -53,7 +53,7 @@ public:
     /**
      * Destructor - JUCE handles component cleanup automatically
      */
-    ~PtV2AEditor() override = default;
+    ~PtV2AEditor() override;
 
     //==============================================================================
     // JUCE Component Lifecycle
@@ -72,6 +72,8 @@ public:
      * Sets positions and sizes of all UI elements (prompt, button, etc.)
      */
     void resized() override;
+    static constexpr int designWidth = 750;
+    bool editorReady = false;                              ///< set once the constructor chose the size; resizes before that are not remembered                ///< the width the layout is designed for; the window width scales it
 
 private:
     //==============================================================================
@@ -113,7 +115,13 @@ private:
     juce::TextButton hybridModeButton { "Hybrid" };
 
     /** Hybrid only: the session's memory locations are the events and scenes; what is missing is spotted/detected. */
-    juce::ToggleButton useMemoryLocationsToggle { "Use existing memory locations" };
+    /** Hybrid: where the events come from. 1 the backend spots everything, 2 the memory
+        locations in the range, a clip without any is spotted, 3 the memory locations alone. */
+    juce::Label eventsSourceLabel { {}, "Events:" };
+    juce::ComboBox eventsSourceBox;
+    /** Hybrid: the range on the tracks of earlier runs ("(gen)", "(db)") is cleared first. */
+    juce::ToggleButton replaceEarlierToggle { "Replace earlier hybrid clips in the range" };
+    void updateKindsEnabled();               ///< the five kinds follow Detect events / the events source
     /** Hybrid only: library recordings that sound like each generated sound, instead of it ... */
     juce::ToggleButton useDatabaseSoundsToggle { "Use database sounds" };
     /** ... or, with this on, on tracks underneath the generated sound, which then stays. */
@@ -143,7 +151,13 @@ private:
      * reason in its tooltip. Probed in the background when the editor opens, after
      * the settings were saved, and every 30 s after that.
      */
-    struct BackendAvailability { bool available = true; bool missed = false; juce::String reason; };
+    struct BackendAvailability
+    {
+        bool available = true;
+        bool missed = false;
+        juce::String reason;
+        double minSeconds = 0.0, maxSeconds = 0.0;   ///< generation: the lengths the health answer named (0: none)
+    };
     std::map<juce::String, BackendAvailability> backendAvailability;   // kind -> state
     int availabilityRequest = 0;
     void refreshBackendAvailability();
@@ -153,9 +167,52 @@ private:
     juce::TextButton spotWholeTrackButton { "Spot Entire Track..." };
     /** Hybrid only: the whole video track, after an estimate of how long that takes. */
     juce::TextButton hybridWholeTrackButton { "Run on entire track..." };
+    /** Which video track the selection or the whole-track run is mapped onto: "Topmost" (then
+        the selection's own video track when it lies on one, else the first with video under
+        the range) or a named track of the session. The list is asked of Pro Tools only
+        when the user opens it, every time, on a
+        background thread: Pro Tools answers PTSL on its message thread, the one this
+        editor runs on, so waiting here would lock both; and a PTSL request while Pro
+        Tools is still loading a session or showing a dialog has crashed it, so nothing
+        is asked at editor open. */
+    struct VideoTrackBox : public juce::ComboBox
+    {
+        std::function<bool()> beforePopup;                  ///< false: the list opens later, when the answer is in
+        void showPopup() override { if (beforePopup && ! beforePopup()) return; juce::ComboBox::showPopup(); }
+    };
+    juce::Label videoTrackLabel { {}, "Video track:" };
+    VideoTrackBox videoTrackComboBox;
+    juce::StringArray videoTrackNames;
+    bool videoTracksFresh = false;                          ///< set while the list is opened programmatically after an answer
+    bool openVideoTrackList = false;                        ///< open the list when the answer arrives
+    int videoTracksRequest = 0;                             ///< the latest refresh; older answers are dropped
+    bool requestVideoTracks();                              ///< true: the list is current, open it now
+    void refreshVideoTracks();                              ///< asks in the background, fills the list when it answers
+    void setVideoTracks (const juce::StringArray& names);   ///< rebuilds the list, keeps the chosen name when it still exists
+    juce::String chosenVideoTrack() const;                 ///< empty: topmost / automatic
+    void addVideoTrackArg (juce::StringArray& args) const;
+    static juce::String warningsOf (const juce::var& json);   ///< the companion's "warnings", joined
+    juce::String resolveWarnings;                         ///< of the last segment resolve (generation)
 
     /** Progress of a running multi-clip operation; hidden while idle. */
-    double progressValue = 0.0;                 // declared before progressBar, which binds to it
+    double progressValue = 0.0;                 // declared before progressBar, which binds to it; set through setProgressTarget
+    /** The bar follows the run's reports (clips, backend steps) but does not stand still
+        between them: it glides towards the next expected report at the pace of the
+        previous ones, stopping short of it until the report comes. A step reported by
+        a model call that takes a minute thus shows movement during that minute. */
+    double progressTarget = -1.0;               ///< the last reported value (-1: busy, nothing measurable)
+    double progressStepSize = 0.0;              ///< size of the last reported rise
+    double progressStepSeconds = 0.0;           ///< smoothed seconds between rises
+    /** A generation in parts (the gateway's windows): the parts are alike, so the bar runs
+        linearly through each one at the pace the previous parts took (learned per run and
+        kept for the next), and lands on k/n when part k+1 begins. */
+    int lastProgressCurrent = 0;
+    int generationPart = 0;
+    juce::Time generationPartStart;
+    double generationSecondsPerPart = 20.0;
+    juce::Time progressTargetTime;              ///< when the target last rose
+    void setProgressTarget (double value);      ///< a reported value; -1 for the busy animation
+    void animateProgress();                     ///< every timer tick: the glide between reports
     juce::ProgressBar progressBar { progressValue };
     juce::Label progressLabel;
     
@@ -267,6 +324,29 @@ private:
     // Choice between V2A and T2A generation modes:
     juce::TextButton v2aModeButton {"V2A (from Video)" };
     juce::TextButton t2aModeButton {"T2A (Text Only)" };
+    /** Recommendation: what the query is made of. "From video": the video under the
+        selection (as before). "From sound": the audio of the clips under the selection on
+        the tracks it lies on, mixed when there are several; the results say where in each
+        recording the match lies and the import takes just that stretch. The prompt counts
+        in both cases. */
+    juce::TextButton fromVideoButton { "From video" };
+    juce::TextButton fromSoundButton { "From sound" };
+    /** "From sketch": the clips under the selection are a sketch (voice, taps) of how the
+        sound runs; the prompt says what it is. The archive is searched by the words, and
+        the stretch inside each recording is chosen by loudness shape. */
+    juce::TextButton fromSketchButton { "From sketch" };
+    enum class RecQuery { Video, Sound, Sketch };
+    RecQuery recQuery = RecQuery::Video;
+    /** How an imported recording is placed, as in Hybrid: trimmed to the selection with
+        the rest of the file as handles, a handle fetched before the matched stretch, and
+        Pro Tools' own fades. Handle length, preset and fade place come from the Hybrid
+        profile's match settings (Settings, Hybrid tab). */
+    juce::ToggleButton recCutToggle { "Cut to the selection" };
+    juce::ToggleButton recHandlesToggle { "Keep handles" };
+    juce::ToggleButton recFadeToggle { "Auto fade" };
+    AdapterProfile clipSettings() const;        ///< the selected hybrid profile, or the defaults
+    float pendingHandleBefore = 0.0f;           ///< seconds of the downloaded stretch that lie before the selection
+    juce::String currentAudioQueryPath;         ///< the selection's audio, written by the companion
     juce::Label durationLabel { {}, "Duration:" };
     juce::ComboBox durationComboBox;       
     /**
@@ -391,8 +471,12 @@ private:
     //==============================================================================
 
     /** Which workflow asked for the segments. */
-    enum class ResolveTarget { Generation, SoundSearch };
+    enum class ResolveTarget { Generation, SoundSearch, SoundSearchAudio };
     ResolveTarget resolveTarget = ResolveTarget::Generation;
+
+    /** Recommendation "From sound": run standalone_api_client.py --action export_selection_audio
+        (async, timer-polled like the resolve); its answer starts the search by sound. */
+    void startSelectionAudioExport();
 
     /** Run standalone_api_client.py --action resolve_video_segments (async, timer-polled). */
     void startVideoSegmentResolve (ResolveTarget target);
@@ -556,7 +640,9 @@ private:
         float timelineEnd = 0.0f,
         float clipStartSeconds = -1.0f,
         float clipEndSeconds = -1.0f,
-        bool autoDetectClipBounds = false
+        bool autoDetectClipBounds = false,
+        const juce::String& audioPath = "",     ///< "From sound"/"From sketch": the query audio instead of a video
+        bool sketch = false                     ///< the audio is a sketch: words decide, the shape locates
     );
     
     /**
@@ -620,6 +706,9 @@ private:
     /** Progress document written by spotting_client.py while it runs. */
     juce::File spottingProgressFile;
     juce::Time spottingProgressMtime;
+    int lastProgressTotal = 0;                  ///< "total" of the last progress document read (parts or clips)
+    void watchGenerationProgress();             ///< a single generation: follow the gateway's parts through the companion's file
+    void endGenerationProgress();               ///< ...and take the bar down when the sound is in
     
     /** Sound search process handle (kept alive during search, no stdout reading) */
     std::unique_ptr<juce::ChildProcess> soundSearchProcess;
@@ -703,7 +792,7 @@ private:
     void addImportTargetArgs (juce::StringArray& commandArray, const juce::String& clipLabel);
     juce::String currentImportClipLabel() const;
 
-    static constexpr int GENERATION_TIMEOUT_MS = 300000;// 5 minutes: a cold backend loads its model first
+    static constexpr int GENERATION_TIMEOUT_MS = 1800000;   // 30 minutes, the shipped profile's timeout: a long range is made in windows
     
     /** Timer polling interval (milliseconds) */
     static constexpr int TIMER_INTERVAL_MS = 100;  // Check every 100ms

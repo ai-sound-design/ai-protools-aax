@@ -139,11 +139,17 @@ def resolve_video_segments(engine, whole_track: bool = False, track_name: Option
     video_tracks = [t for t in engine.track_list() if _is_video_track(t)]
     if not video_tracks:
         return {"success": False, "error": "The session has no video track."}
-    track = next((t for t in video_tracks if t.name == track_name), None) if track_name else video_tracks[0]
-    if track is None:
-        return {"success": False, "error": f"No video track named '{track_name}' in the session."}
-    if len(video_tracks) > 1:
-        warnings.append(f"{len(video_tracks)} video tracks in the session; using '{track.name}'.")
+    # Which video track: a named one when the caller says; otherwise the topmost, and for
+    # a selection the selection's own video track when it lies on one, else the first
+    # track (top to bottom) with video under the selection (decided below, once the
+    # edit selection can be moved).
+    track = None
+    chosen_by = "topmost"
+    if track_name:
+        track = next((t for t in video_tracks if t.name == track_name), None)
+        if track is None:
+            return {"success": False, "error": f"No video track named '{track_name}' in the session."}
+        chosen_by = "chosen in the plugin"
 
     saved_in, saved_out = engine.get_timeline_selection(pt.TimeCode)
     origin = tc.to_frames(engine.session_start_time())
@@ -190,6 +196,21 @@ def resolve_video_segments(engine, whole_track: bool = False, track_name: Option
             set_options(link_timeline_and_edit_selection=True, link_track_and_edit_selection=True)
         else:
             warnings.append("Edit mode options not readable; used select-all-clips to reach the video track.")
+        if track is None:
+            track = video_tracks[0]
+            if len(video_tracks) > 1 and not whole_track:
+                on_video = [t for t in video_tracks if t.name in edit_selected_tracks]
+                sel_in, sel_out = tc.to_frames(saved_in), tc.to_frames(saved_out)
+                if on_video:
+                    track, chosen_by = on_video[0], "the selection lies on it"
+                elif sel_out > sel_in:
+                    for candidate in video_tracks:
+                        move_edit_selection_to([candidate.name])
+                        if files_between(sel_in, sel_out):
+                            track, chosen_by = candidate, "the first with video under the selection"
+                            break
+        if len(video_tracks) > 1:
+            warnings.append(f"{len(video_tracks)} video tracks in the session; using '{track.name}' ({chosen_by}).")
         move_edit_selection_to([track.name])
 
         if whole_track:
@@ -315,9 +336,13 @@ def _flag(track, attribute: str) -> bool:
     if value is None:
         return False
     try:
-        return pt.TripleBool.Name(value) == "SetExplicitly"
-    except (ValueError, AttributeError):
-        return value == getattr(pt, "SetExplicitly", 1)
+        # The field's own enum (TrackAttributeState in current Pro Tools, TripleBool in older
+        # ones): set means SetExplicitly / SetImplicitly / TB_True, not None or unknown
+        field = attrs.DESCRIPTOR.fields_by_name[attribute]
+        name = field.enum_type.values_by_number[int(value)].name if field.enum_type else str(value)
+    except (KeyError, AttributeError, ValueError, TypeError):
+        return bool(value)
+    return name.startswith("Set") or name in ("TB_True", "TBool_True")
 
 
 def _edit_mode_options(engine) -> Dict:

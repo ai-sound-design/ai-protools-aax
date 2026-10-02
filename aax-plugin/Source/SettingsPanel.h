@@ -3,14 +3,16 @@
 #include "PluginProcessor.h"
 
 /**
- * Settings dialog: the adapter profiles (one JSON file per backend), how to reach
- * them, and a few plugin-wide options.
+ * Settings dialog, one tab per mode: Spotting, Generation, Recommendation, Hybrid, then
+ * Plugin (its own options, and the tunnel as its advanced part).
  *
- * Every profile in the adapters folder gets a row: name, kind, its address and a
- * Test button that probes <address><health> off the message thread. Editing the
- * address writes it back into the profile file. "Advanced" switches to the
- * Cloudflare Access tunnel: the rows then edit each profile's tunnel address and
- * the service token becomes editable.
+ * A mode's tab lists the adapter profiles of its kind (one JSON file per backend):
+ * name, address, a Test button that probes <address><health> off the message thread,
+ * and the options the profile carries (a hybrid backend's library match). Editing the
+ * address writes it back into the profile file. The lengths a generation backend
+ * accepts are not edited here: the backend reports them in its health answer, the
+ * profile's "duration" block is only the fallback for a backend that says nothing.
+ * The footer opens the profiles folder and reloads it.
  */
 class SettingsPanel : public juce::Component
 {
@@ -21,9 +23,9 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
 
-    static constexpr int preferredWidth = 660;
+    static constexpr int preferredWidth = 760;
     static constexpr int rowHeight = 28;
-    static constexpr int lengthRowHeight = 24;
+    static constexpr int optionRowHeight = 24;
 
 private:
     struct AdapterRow
@@ -33,56 +35,78 @@ private:
         juce::TextEditor url;
         juce::TextButton test { "Test" };
         juce::Label status;
-        // Generation profiles only: the lengths the backend accepts, in seconds
-        juce::Label lengthLabel { {}, "Length (s): min" };
-        juce::TextEditor minLength, maxLength, defaultLength;
-        juce::Label maxLabel { {}, "max" }, defaultLabel { {}, "default" };
-        bool hasLengths() const { return profile.isValid() && profile.kind == "generation"; }
-        // Hybrid profiles only: how finely a generated sound may be stitched from library pieces
-        juce::Label piecesLabel { {}, "Pieces per 10 s" };
+        // Hybrid profiles only: the library match, one option per line (label, field, short hint)
         juce::TextEditor pieces, layers, minSimilarity, handleSeconds, tracksPerScene, fadePreset, fadeSeconds;
-        juce::Label layersLabel { {}, "max db tracks" }, similarityLabel { {}, "min similarity" };
-        juce::Label handleLabel { {}, "Ambience handles (s)" }, tracksLabel { {}, "tracks per scene" };
-        juce::Label fadeLabel { {}, "Fade preset" }, fadeSecondsLabel { {}, "fade (s)" };
+        juce::ComboBox fadePlace;            ///< where the fade runs: outside the event (1) or inside it (2)
+        struct Option { juce::Label label, hint; juce::Component* field; int fieldWidth; };
+        std::vector<std::unique_ptr<Option>> options;
         bool hasMatch() const { return profile.isValid() && profile.kind == "hybrid"; }
-        bool hasSubRow() const { return hasLengths() || hasMatch(); }
     };
 
-    int preferredHeight() const;
-    void rebuildRows();
+    /** One tab. Its content is laid out by `layout` (given the width, returns the height
+        used) and scrolls when it is taller than the page. */
+    struct Page : public juce::Component
+    {
+        Page();
+        void resized() override;
+        juce::Viewport viewport;
+        juce::Component content;
+        std::function<int (int width)> layout;
+        int contentHeight = 0;
+    };
+
+    /** A mode's tab: its profiles. */
+    struct BackendPage
+    {
+        juce::String kind;                   ///< "spotting", "generation", "search", "hybrid"
+        Page page;
+        juce::Label hint;                    ///< what this kind of backend does
+        std::vector<std::unique_ptr<AdapterRow>> rows;
+    };
+
+    void buildTabs();
+    void buildRows (BackendPage& backend);
+    int layoutBackendPage (BackendPage& backend, int width);
+    int layoutPluginPage (int width);
     void loadFromSettings();
     void applyTunnelMode();
     void testAdapter (AdapterRow& row);
     void save();
     void close();
+    void fitToContent();
     static void setUpNumberEditor (juce::TextEditor& editor, double value);
 
     PtV2AProcessor& processor;
     PtV2AProcessor::BackendSettings settings;
     std::function<void()> onSaved;
 
-    juce::Label intro;
-    std::vector<std::unique_ptr<AdapterRow>> rows;
+    juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
+    std::vector<std::unique_ptr<BackendPage>> backends;
+    Page pluginPage;
+
+    // Footer: the profiles folder, Cancel and Save
     juce::TextButton openFolderButton { "Open Adapter Folder..." };
     juce::TextButton reloadButton { "Reload" };
     juce::Label folderHint;
+    juce::TextButton saveButton { "Save" };
+    juce::TextButton cancelButton { "Cancel" };
 
-    juce::ToggleButton tunnelToggle { "Advanced: reach the backends through a Cloudflare Access tunnel" };
-    juce::Label clientIdLabel { {}, "Client ID" };
-    juce::Label clientSecretLabel { {}, "Client secret" };
-    juce::TextEditor clientId;
-    juce::TextEditor clientSecret;
-    juce::Label tunnelHint;
-
+    // Plugin tab
     juce::Label searchCountLabel { {}, "Sounds per search" };
     juce::ComboBox searchCount;
     juce::Label searchCountHint;
-
     juce::ToggleButton logToggle { "Save a log file (for troubleshooting)" };
     juce::Label logHint;
 
-    juce::TextButton saveButton { "Save" };
-    juce::TextButton cancelButton { "Cancel" };
+    // Plugin tab, advanced part: the tunnel
+    juce::Label advancedHeading { {}, "Advanced: tunnel or proxy" };
+    juce::ToggleButton tunnelToggle { "Reach the backends through a tunnel or proxy (Cloudflare Access, Pangolin, ...)" };
+    /** Up to two headers sent with every request while the tunnel is on: name and value each. */
+    juce::Label headerLabel[2] { { {}, "Header 1" }, { {}, "Header 2" } };
+    juce::TextEditor headerName[2];
+    juce::TextEditor headerValue[2];
+    juce::Label tunnelHint;
+    void maskSecretValues();                 ///< a value whose header name says secret/token/key/password is shown as dots
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SettingsPanel)
 };

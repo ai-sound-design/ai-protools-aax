@@ -140,10 +140,17 @@ def get_api_url(service: str) -> str:
 
 
 def get_cf_headers() -> Dict[str, str]:
-    """Return Cloudflare Access headers (only when enabled)."""
+    """The headers sent with every request while the tunnel is on: config.json
+    "tunnel_headers" ({name: value}; Cloudflare Access wants CF-Access-Client-Id and
+    CF-Access-Client-Secret, Pangolin or another proxy its access-token header). An
+    older config's cf_access_client_id/secret pair is read as those two headers. Empty
+    when the tunnel is off. (The name is historical; the headers are whatever is configured.)"""
     if not use_cloudflared():
         return {}
     cfg = _load_config()
+    headers = cfg.get("tunnel_headers")
+    if isinstance(headers, dict):
+        return {str(k).strip(): str(v).strip() for k, v in headers.items() if str(k).strip() and str(v).strip()}
     client_id = cfg.get("cf_access_client_id")
     client_secret = cfg.get("cf_access_client_secret")
     if client_id and client_secret:

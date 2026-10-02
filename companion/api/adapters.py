@@ -34,8 +34,10 @@ Field values are templates: {prompt}, {negative_prompt}, {seed}, {duration} are 
 in; a template ending in "?}" is left out when its value is empty. Other values are
 sent as they are. "response.kind" is "audio_file" (the body is the audio) or "json"
 with "audio_url_field" / "audio_path_field" naming where the audio can be fetched.
-"duration" states the lengths the backend accepts in seconds: the plugin offers
-them in its T2A list and skips clips outside them (4-12 s when the block is missing).
+"duration" states the lengths the backend accepts in seconds, for a backend whose
+health answer does not name them ("min_seconds" / "max_seconds", at the top or under
+"capabilities"); the plugin offers them in its T2A list and skips clips outside them
+(4-12 s when neither says).
 
 Search and spotting profiles carry name, kind, base_url(s), health and the
 protocol name; their request shape is the plugin's own ("ai-sound-design-search-v1",
@@ -51,8 +53,10 @@ along: "pieces_per_10s" (how finely a sound may be stitched from pieces),
 (share of the event's description in the score), "min_similarity" (pieces below it
 are not placed; a sound without a convincing match keeps its generated version) and
 "ambience_handle_seconds" (an ambience piece keeps that much of its recording before
-and after the matched stretch, for fades) and "tracks_per_scene" (placement only, not
-sent: at most this many tracks per scene, see hybrid_client.py). "request.scenes_endpoint"
+and after the matched stretch, for fades), "tracks_per_scene" (placement only, not
+sent: at most this many tracks per scene, see hybrid_client.py) and the fade of an
+ambience clip ("fade_preset", "fade_seconds", "fade_inside": the fade runs over the
+handle outside the event, or inside it as at a cut; placement only). "request.scenes_endpoint"
 (default "/hybrid/scenes") groups the clips of a range into scenes (see scenes_with_profile).
 
 A search profile may add constant form fields
@@ -83,7 +87,10 @@ DEFAULT_PROFILES: Dict[str, Dict[str, Any]] = {
         "schema": 1,
         "name": "MMAudio (local)",
         "kind": "generation",
-        "base_url": "http://localhost:8000",
+        # The generation gateway (port 8010) in front of the model service: it makes any
+        # length up to its own maximum, in windows, so the profile's "duration.max" is the
+        # gateway's limit, not the model's 12 s
+        "base_url": "http://localhost:8010",
         "base_url_tunnel": "",
         "health": "/health",
         "protocol": "multipart-generate",
@@ -104,8 +111,8 @@ DEFAULT_PROFILES: Dict[str, Dict[str, Any]] = {
         },
         "response": {"kind": "audio_file"},
         "supports": ["negative_prompt", "seed", "duration", "text_only"],
-        "duration": {"min": 4, "max": 12, "default": 8},
-        "timeout_seconds": 600,
+        "duration": {"min": 4, "max": 600, "default": 8},
+        "timeout_seconds": 1800,
     },
     "hunyuan_xl.json": {
         "schema": 1,
@@ -167,8 +174,9 @@ DEFAULT_PROFILES: Dict[str, Dict[str, Any]] = {
         },
         "response": {"kind": "json", "sounds_field": "sounds", "audio_url_field": "audio_url"},
         "supports": ["negative_prompt", "seed", "memory_locations", "database_match"],
-        "match": {"pieces_per_10s": 3, "min_piece_seconds": 2, "layers": 1, "text_weight": 0.0, "min_similarity": 0.5,
-                  "ambience_handle_seconds": 10, "tracks_per_scene": 8},
+        "match": {"pieces_per_10s": 0, "min_piece_seconds": 1, "layers": 1, "text_weight": 0.5, "min_similarity": 0.5,
+                  "split_gain": 0.0, "ambience_handle_seconds": 10, "tracks_per_scene": 8,
+                  "fade_preset": "AI Sound Design", "fade_seconds": 1, "fade_inside": False},
         "timeout_seconds": 1800,
     },
 }
@@ -208,11 +216,19 @@ def ensure_default_profiles() -> List[Path]:
     return written
 
 
+# Addresses a shipped default used to have, and where the same service lives now: a
+# profile still at the old shipped address is moved along (an address the user set
+# stays). The generation profile moved from the model service to the gateway in
+# front of it, whose length limit is the one its "duration" block has to state.
+_MOVED_DEFAULT_ADDRESSES = {"mmaudio.json": ("http://localhost:8000", "http://localhost:8010")}
+
+
 def _upgrade_default_profiles() -> List[Path]:
     """A shipped default that still carries the default name and protocol learns the
-    capabilities a newer plugin added ("supports" entries, "duration"/"match" blocks).
-    Addresses and anything the user changed are left alone; a profile the user
-    renamed is not touched at all."""
+    capabilities a newer plugin added ("supports" entries, "duration"/"match" blocks
+    and new keys inside them). Addresses and anything the user changed are left
+    alone, except a shipped address that moved (see _MOVED_DEFAULT_ADDRESSES); a
+    profile the user renamed is not touched at all."""
     upgraded = []
     for filename, default in DEFAULT_PROFILES.items():
         path = ADAPTER_DIR / filename
@@ -222,9 +238,18 @@ def _upgrade_default_profiles() -> List[Path]:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(doc, dict) or doc.get("name") != default["name"]                 or doc.get("protocol") != default.get("protocol"):
+        if not isinstance(doc, dict) or doc.get("name") != default["name"] \
+                or doc.get("protocol") != default.get("protocol"):
             continue
         changed = False
+        old_url, new_url = _MOVED_DEFAULT_ADDRESSES.get(filename, (None, None))
+        if old_url and str(doc.get("base_url", "")).rstrip("/") == old_url:
+            doc["base_url"] = new_url
+            # The limits at the old address were the model's; the new service has its own
+            for key in ("duration", "timeout_seconds"):
+                if key in default:
+                    doc[key] = json.loads(json.dumps(default[key]))
+            changed = True
         for feature in default.get("supports", []):
             if feature not in doc.setdefault("supports", []):
                 doc["supports"].append(feature)
@@ -233,6 +258,11 @@ def _upgrade_default_profiles() -> List[Path]:
             if block in default and block not in doc:
                 doc[block] = json.loads(json.dumps(default[block]))
                 changed = True
+            elif block in default and isinstance(doc.get(block), dict):
+                for key, value in default[block].items():
+                    if key not in doc[block]:
+                        doc[block][key] = json.loads(json.dumps(value))
+                        changed = True
         if changed:
             path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
             upgraded.append(path)
@@ -417,8 +447,10 @@ def resolve_seed(seed: Optional[int], log=print) -> int:
 def generate_with_profile(profile: Dict[str, Any], *, video_path: Optional[str], prompt: str,
                           negative_prompt: str, seed: int, duration: Optional[float],
                           output_dir: str, output_format: str = "wav", timeout: Optional[int] = None,
-                          log=print) -> Optional[str]:
-    """POST the request the profile describes; save the audio; return its path (None on failure)."""
+                          log=print, on_progress=None) -> Optional[str]:
+    """POST the request the profile describes; save the audio; return its path (None on failure).
+    `on_progress(dict)` gets the backend's progress answers while the request runs (the
+    generation gateway reports its windows: stage, part, parts, fraction, detail)."""
     import requests
 
     if profile.get("kind") != "generation":
@@ -442,14 +474,18 @@ def generate_with_profile(profile: Dict[str, Any], *, video_path: Optional[str],
     log(f"Adapter '{profile.get('name')}': POST {url} fields={sorted(data)}"
         + (f" video={Path(video_path).name}" if video_path else " (text only)"))
 
+    job_id = uuid.uuid4().hex
+    data["job_id"] = job_id            # the gateway reports its windows under this id; a model service ignores it
+    endpoint = str(request_spec.get("endpoint", "/generate"))
     started = time.time()
     try:
-        if video_path:
-            with open(video_path, "rb") as handle:
-                files = {str(request_spec.get("video_field", "video")): (Path(video_path).name, handle, "video/mp4")}
-                response = requests.post(url, files=files, data=data, headers=headers, timeout=timeout)
-        else:
-            response = requests.post(url, data=data, headers=headers, timeout=timeout)
+        with ProgressPolling(progress_url_for(profile, endpoint, job_id), on_progress):
+            if video_path:
+                with open(video_path, "rb") as handle:
+                    files = {str(request_spec.get("video_field", "video")): (Path(video_path).name, handle, "video/mp4")}
+                    response = requests.post(url, files=files, data=data, headers=headers, timeout=timeout)
+            else:
+                response = requests.post(url, data=data, headers=headers, timeout=timeout)
     except requests.RequestException as exc:
         log(f"ERROR: request failed: {exc}")
         return None
@@ -495,12 +531,19 @@ def generate_with_profile(profile: Dict[str, Any], *, video_path: Optional[str],
         filename = f"{safe}_{seed}_{time.strftime('%Y%m%d_%H%M%S')}{ext}"
     target = out_dir / filename
     target.write_bytes(response.content)
-    log(f"Saved {target} ({len(response.content) / 1024:.0f} KB) after {time.time() - started:.1f}s")
+    parts = response.headers.get("X-Generation-Parts")
+    log(f"Saved {target} ({len(response.content) / 1024:.0f} KB) after {time.time() - started:.1f}s"
+        + (f", generated in {parts} parts" if parts and parts.isdigit() and int(parts) > 1 else ""))
     return str(target)
 
 
-MATCH_DEFAULTS = {"pieces_per_10s": 3, "min_piece_seconds": 2.0, "layers": 1, "text_weight": 0.0, "min_similarity": 0.5,
-                  "ambience_handle_seconds": 10.0, "tracks_per_scene": 8}
+MATCH_DEFAULTS = {"pieces_per_10s": 0, "min_piece_seconds": 1.0, "layers": 1, "text_weight": 0.5, "min_similarity": 0.5,
+                  "split_gain": 0.0, "ambience_handle_seconds": 10.0, "tracks_per_scene": 8,
+                  "fade_preset": "AI Sound Design", "fade_seconds": 1.0, "fade_inside": False}
+# pieces_per_10s 0: automatic, the backend counts the generated sound's onsets and reads
+# the spotting's word on the event (discrete, continuous, stationary); split_gain: the
+# similarity gain a cut must bring to stay, 0 cuts as fine as allowed whenever it does
+# not get worse, so each step or bark gets its own library piece, placed where it happens
 
 
 def match_settings(profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -511,8 +554,10 @@ def match_settings(profile: Dict[str, Any]) -> Dict[str, Any]:
 def hybrid_with_profile(profile: Dict[str, Any], *, video_path: str, start_timecode: str, fps: float,
                         prompt: str, negative_prompt: str, seed: int, events: Optional[List[Dict[str, Any]]],
                         output_dir: str, timeout: Optional[int] = None, log=print,
-                        on_progress=None, match: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                        on_progress=None, match: Optional[Dict[str, Any]] = None,
+                        categories: Optional[str] = None) -> Dict[str, Any]:
     """POST a video range to a hybrid backend; download every sound it answers with.
+    `categories` (comma-separated kinds) tells the backend's spotting what is wanted.
 
     `on_progress(dict)` gets the backend's progress answers while the request runs.
     `match` (the profile's match settings) asks for library pieces that sound like
@@ -530,10 +575,12 @@ def hybrid_with_profile(profile: Dict[str, Any], *, video_path: str, start_timec
     data["fps"] = str(fps)
     if events is not None:
         data["events"] = json.dumps(events, ensure_ascii=False)
+    if categories:
+        data["categories"] = categories
     if match:
         data["match"] = "true"
         for key in ("pieces_per_10s", "min_piece_seconds", "layers", "text_weight", "library", "category_filter",
-                    "min_similarity", "ambience_handle_seconds"):
+                    "min_similarity", "ambience_handle_seconds", "split_gain"):
             if match.get(key) not in (None, ""):
                 data[key] = str(match[key]).lower() if isinstance(match[key], bool) else str(match[key])
     job_id = uuid.uuid4().hex

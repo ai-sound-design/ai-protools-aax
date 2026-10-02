@@ -255,8 +255,29 @@ static const juce::String DEFAULT_NEGATIVE_PROMPT;         ///< Default sounds t
         bool saveLogs = true;          ///< write the plugin log file ("save_logs" in config.json)
         int searchResults = 10;        ///< sounds per recommendation search ("search_results" in config.json)
         std::map<juce::String, juce::String> adapters;     ///< kind (generation/search/spotting) -> profile file name
-        juce::String clientId;
-        juce::String clientSecret;
+        /** Headers sent with every request while the tunnel is on, up to two: for Cloudflare
+            Access "CF-Access-Client-Id" and "CF-Access-Client-Secret" (a service token), for
+            Pangolin or another proxy its access-token header. config.json: "tunnel_headers". */
+        juce::StringArray tunnelHeaderNames, tunnelHeaderValues;
+        /** True when at least one header has a name and a value. */
+        bool tunnelTokenPresent() const
+        {
+            for (int i = 0; i < juce::jmin (tunnelHeaderNames.size(), tunnelHeaderValues.size()); ++i)
+                if (tunnelHeaderNames[i].trim().isNotEmpty() && tunnelHeaderValues[i].trim().isNotEmpty())
+                    return true;
+            return false;
+        }
+        /** The headers as a "Name: value\r\n" block for juce::URL requests (empty when the tunnel is off). */
+        juce::String tunnelHeaderBlock() const
+        {
+            juce::String block;
+            if (! useTunnel)
+                return block;
+            for (int i = 0; i < juce::jmin (tunnelHeaderNames.size(), tunnelHeaderValues.size()); ++i)
+                if (tunnelHeaderNames[i].trim().isNotEmpty() && tunnelHeaderValues[i].trim().isNotEmpty())
+                    block += tunnelHeaderNames[i].trim() + ": " + tunnelHeaderValues[i].trim() + "\r\n";
+            return block;
+        }
         std::map<juce::String, juce::String> directUrls;   ///< by service key
         std::map<juce::String, juce::String> tunnelUrls;   ///< by service key
 
@@ -284,14 +305,19 @@ static const juce::String DEFAULT_NEGATIVE_PROMPT;         ///< Default sounds t
     /** Write a profile's address (base_url, or base_url_tunnel when `tunnel`) back into its file. */
     bool saveAdapterUrl (const juce::String& file, const juce::String& url, bool tunnel);
 
-    /** Write the lengths a generation backend accepts ("duration": {min, max, default}) into its profile file. */
-    bool saveAdapterDuration (const juce::String& file, double minSeconds, double maxSeconds, double defaultSeconds);
+    /** The lengths a generation backend reported in its health answer ("min_seconds" /
+        "max_seconds", at the top or under "capabilities"), kept per profile file for this
+        run and laid over the profile's "duration" block by getAdapterProfiles(). The
+        profile's block is only the word of a backend that says nothing. */
+    void setReportedDurationLimits (const juce::String& file, double minSeconds, double maxSeconds);
+    /** Reads those limits out of a health body; false when it names none. */
+    static bool parseDurationLimits (const juce::String& healthBody, double& minSeconds, double& maxSeconds);
 
     /** Write a hybrid backend's library-match settings ("match": {pieces_per_10s, layers}) into its profile file,
         keeping the block's other keys. */
     bool saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity,
                            double ambienceHandleSeconds, int tracksPerScene, const juce::String& fadePreset,
-                           double fadeSeconds);
+                           double fadeSeconds, bool fadeInside);
 
     BackendSettings getBackendSettings();
     bool saveBackendSettings (const BackendSettings& settings);
@@ -308,6 +334,18 @@ static const juce::String DEFAULT_NEGATIVE_PROMPT;         ///< Default sounds t
 
     /** The folder holding config.json and the log; created on first use, taking over an older PTV2A config.json when present. */
     static juce::File getUserDataDir();
+
+    /** The editor window size the user last chose: kept per instance (the window is re-created
+        on every open, freeze and unfreeze), saved with the session and in ui.json next to
+        config.json so a new instance opens at the same size. 0 = not chosen yet. */
+    int editorWidth = 0, editorHeight = 0;
+
+    /** The JSON the running generation mirrors the backend's progress into (parts of a
+        long sound through the gateway); set when a generation is launched. */
+    juce::File generationProgressFile;
+    static juce::File getUiFilePath();                       ///< ui.json inside getUserDataDir()
+    void rememberEditorSize (int width, int height);         ///< per instance and in ui.json
+    void loadRememberedEditorSize();                         ///< from ui.json, when the instance has none yet
 
     /** config.json inside getUserDataDir(). */
     static juce::File getConfigFilePath();
@@ -546,6 +584,8 @@ private:
 
     juce::String hostTrackName;
     mutable juce::CriticalSection hostTrackNameLock;
+    std::map<juce::String, std::pair<double, double>> reportedDurationLimits;   // profile file -> (min, max) from health
+    juce::CriticalSection reportedDurationLock;
 
     std::atomic<juce::uint64> processBlockCalls { 0 };
     std::atomic<double> lastSampleRate { 0.0 };

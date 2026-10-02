@@ -226,6 +226,88 @@ def search_sounds(
 
 
 
+def search_by_sound(
+    audio_path: str,
+    text_query: Optional[str] = None,
+    limit: int = DEFAULT_LIMIT,
+    text_weight: float = 0.0,
+    quiet: bool = False,
+    envelope_weight: Optional[float] = None,
+    only: Optional[List[int]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """Library windows that sound like `audio_path` (POST /search/by_audio), each with
+    `offset_seconds`/`length_seconds`: the stretch of the recording that matched, in the
+    query's length. `text_weight` is the share of `text_query` in the query (0: the sound
+    alone). None when the request fails or the backend has no audio index."""
+    try:
+        url = f"{get_sound_search_url()}/search/by_audio"
+        data = {"limit": limit, "text_weight": text_weight, "refine": "true"}
+        if envelope_weight is not None:
+            # Share of the loudness-envelope similarity when the stretch inside a recording
+            # is chosen: a sketch wants nearly all of it, a real sound the backend's default
+            data["envelope_weight"] = envelope_weight
+        if only:
+            data["only"] = ",".join(str(i) for i in only)      # search inside these sounds alone
+        try:
+            from .adapters import search_request_fields
+            data.update({k: v for k, v in search_request_fields().items() if k in ("library", "category")})
+        except Exception:
+            pass
+        if text_query:
+            data["text"] = text_query
+        with open(audio_path, "rb") as handle:
+            files = {"audio": (Path(audio_path).name, handle, "audio/wav")}
+            response = requests.post(url, files=files, data=data, headers=get_cf_headers(), timeout=120)
+        if response.status_code == 503:
+            if not quiet:
+                print(f"[ERROR] The search service has no audio index yet: {response.text[:200]}")
+            return None
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        if not quiet:
+            print(f"[OK] Found {len(results)} results by sound")
+        return results
+    except requests.exceptions.RequestException as e:
+        if not quiet:
+            print(f"[ERROR] Search by sound failed: {e}")
+        return None
+
+
+def download_snippet(
+    sound_id: int,
+    start_seconds: float,
+    length_seconds: float,
+    output_dir: Optional[str] = None,
+    session_id: Optional[str] = None,
+    quiet: bool = False,
+) -> Optional[str]:
+    """`length_seconds` of the sound from `start_seconds` as a 48 kHz WAV (GET
+    /sounds/{id}/snippet): the stretch a search by sound pointed at, ready to place."""
+    try:
+        url = f"{get_sound_search_url()}/sounds/{sound_id}/snippet"
+        response = requests.get(url, params={"start": f"{start_seconds:.3f}", "length": f"{length_seconds:.3f}"},
+                                headers=get_cf_headers(), timeout=120)
+        response.raise_for_status()
+        content_disp = response.headers.get("Content-Disposition", "")
+        if "filename=" in content_disp:
+            filename = content_disp.split("filename=")[-1].strip('"')
+        else:
+            filename = f"sound_{sound_id}_{start_seconds:.1f}s.wav"
+        if output_dir and os.path.isdir(output_dir):
+            target_dir = output_dir
+        else:
+            target_dir = os.path.join(tempfile.gettempdir(), "sound-search", session_id or "")
+        os.makedirs(target_dir, exist_ok=True)
+        output_file = os.path.join(target_dir, filename)
+        with open(output_file, "wb") as f:
+            f.write(response.content)
+        return output_file
+    except requests.exceptions.RequestException as e:
+        if not quiet:
+            print(f"[ERROR] Snippet download failed: {e}")
+        return None
+
+
 def get_sound_info(sound_id: int, quiet: bool = False) -> Optional[Dict[str, Any]]:
     """
     Get detailed information about a specific sound.

@@ -61,14 +61,28 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     }
 
     // Hybrid: whether the session's memory locations define the sound events
-    useMemoryLocationsToggle.setToggleState (true, juce::dontSendNotification);
-    useMemoryLocationsToggle.setTooltip ("On: the memory locations inside the range are used as they are: event markers "
-                                         "(a spotting run, or markers you set) as the sound events, \"Scene n: ...\" "
-                                         "markers as the scenes; a clip without events is spotted by the backend, "
-                                         "scenes without markers are detected. Off: the backend spots and detects "
-                                         "everything itself.");
-    useMemoryLocationsToggle.setVisible (false);
-    contentComponent.addAndMakeVisible (useMemoryLocationsToggle);
+    eventsSourceLabel.setFont (juce::Font (14.0f));
+    eventsSourceLabel.setVisible (false);
+    contentComponent.addAndMakeVisible (eventsSourceLabel);
+    eventsSourceBox.addItem ("Spot everything", 1);
+    eventsSourceBox.addItem ("Markers, spot the rest", 2);
+    eventsSourceBox.addItem ("Markers only", 3);
+    eventsSourceBox.setSelectedId (2, juce::dontSendNotification);
+    eventsSourceBox.setTooltip ("Spot everything: the backend finds the sound events and scenes of the range itself, "
+                                "kept to the kinds ticked below. Markers, spot the rest: the memory locations inside "
+                                "the range are the events (a spotting run, or markers you set) and \"Scene n: ...\" "
+                                "markers the scenes; a clip without events is spotted, scenes without markers are "
+                                "detected. Markers only: a clip without memory locations is skipped.");
+    eventsSourceBox.onChange = [this] { updateKindsEnabled(); };
+    eventsSourceBox.setVisible (false);
+    contentComponent.addAndMakeVisible (eventsSourceBox);
+    replaceEarlierToggle.setToggleState (true, juce::dontSendNotification);
+    replaceEarlierToggle.setTooltip ("On: before the new sounds are placed, the marked range is cleared on every track "
+                                     "of an earlier hybrid run (names ending in \"(gen)\" or \"(db)\"), so a repeated "
+                                     "run replaces its clips instead of stacking new ones on the old. Off: the old "
+                                     "clips stay, new clips go on top.");
+    replaceEarlierToggle.setVisible (false);
+    contentComponent.addAndMakeVisible (replaceEarlierToggle);
 
     // Hybrid: library recordings that sound like the generated sounds, instead of or next to them
     useDatabaseSoundsToggle.setTooltip ("On: for every generated sound the backend finds library recordings that "
@@ -104,11 +118,12 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     // Pro Tools' own fades, from a batch-fades preset (Settings), at both ends of a
     // trimmed ambience piece; editable like any fade, and they follow the clip's edges
     autoFadeToggle.setToggleState (true, juce::dontSendNotification);
-    autoFadeToggle.setTooltip ("On: an ambience clip keeps the fade length set in Settings (fade (s), default 1) of "
-                               "its handle outside the event on each side and gets Pro Tools' own fade-in and "
-                               "fade-out over that stretch, from the batch-fades preset named in Settings "
-                               "(default \"AI Sound Design\", saved once in Pro Tools). Off: no fades, the clip "
-                               "ends at the event, the fades are yours to set.");
+    autoFadeToggle.setTooltip ("On: an ambience clip gets Pro Tools' own fade-in and fade-out from the batch-fades "
+                               "preset named in Settings (default \"AI Sound Design\", saved once in Pro Tools). "
+                               "Fade place in Settings says where: outside the event, the clip keeps the fade "
+                               "length (fade (s), default 1) of its handle beyond the event and is at full level "
+                               "at the edges; inside, the clip ends at the event and the fade runs within it, as "
+                               "at a scene cut. Off: no fades, the clip ends at the event, the fades are yours to set.");
     autoFadeToggle.setEnabled (false);
     autoFadeToggle.setVisible (false);
     contentComponent.addAndMakeVisible (autoFadeToggle);
@@ -124,11 +139,7 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
     detectEventsToggle.setTooltip ("On: the backend lists the sound events of the range, one memory location each. "
                                    "Off: only scenes and clip markers.");
     detectEventsToggle.setVisible (false);
-    detectEventsToggle.onClick = [this]
-    {
-        for (auto* t : { &dialogueToggle, &foleyToggle, &sfxToggle, &ambienceToggle, &musicToggle })
-            t->setEnabled (detectEventsToggle.getToggleState());
-    };
+    detectEventsToggle.onClick = [this] { updateKindsEnabled(); };
     contentComponent.addAndMakeVisible (detectEventsToggle);
     eventKindsLabel.setFont (juce::Font (14.0f));
     eventKindsLabel.setVisible (false);
@@ -176,6 +187,19 @@ PtV2AEditor::PtV2AEditor (PtV2AProcessor& p)
                                        "which takes hours for a film. Shows an estimate first.");
     hybridWholeTrackButton.onClick = [this] { startHybrid (true, false, true); };
     contentComponent.addChildComponent (hybridWholeTrackButton);
+
+    // Which video track: the session can hold several (each dropped file makes one)
+    videoTrackLabel.setJustificationType (juce::Justification::centredRight);
+    videoTrackLabel.setFont (juce::Font (14.0f));
+    contentComponent.addAndMakeVisible (videoTrackLabel);
+    videoTrackComboBox.addItem ("Topmost", 1);
+    videoTrackComboBox.setSelectedId (1, juce::dontSendNotification);
+    videoTrackComboBox.setTooltip ("The video track the selection (or the whole-track run) is mapped onto. "
+                                   "Topmost: the first video track; for a selection lying on a video track, that one; "
+                                   "for a selection on an audio track, the first video track with video under it. "
+                                   "Or a named track of the session. The session is asked for its tracks when the list is opened.");
+    videoTrackComboBox.beforePopup = [this] { return requestVideoTracks(); };
+    contentComponent.addAndMakeVisible (videoTrackComboBox);
 
     // Progress of multi-clip runs; shown while a run is active
     progressBar.setPercentageDisplay (false);
@@ -264,8 +288,14 @@ contentComponent.addAndMakeVisible (settingsButton);
     negativePromptInput.setMultiLine (true);
     negativePromptInput.setReturnKeyStartsNewLine (true);
     negativePromptInput.setScrollbarsShown (true);
-    negativePromptInput.setTextToShowWhenEmpty ("voices, music, melody, singing, speech,interference", juce::Colours::grey);
-    negativePromptInput.setText ("voices, music, melody, singing, speech, interference");  // Set default value
+    // Empty by default: Generation then keeps voices and music out (the placeholder's list);
+    // Hybrid builds each event's own negative in the backend and adds what is typed here.
+    negativePromptInput.setTextToShowWhenEmpty ("empty: voices, music, melody, singing, speech, interference",
+                                                juce::Colours::grey);
+    negativePromptInput.setTooltip ("What the sound must not contain. Empty: in Sound Generation the list against "
+                                    "voices and music is used; in Hybrid the backend builds each event's own negative "
+                                    "(the other events overlapping it in time, and that list for everything but "
+                                    "dialogue and music). Whatever you type is added to every sound.");
     contentComponent.addAndMakeVisible (negativePromptInput);
     
     // Configure seed label
@@ -292,7 +322,51 @@ contentComponent.addAndMakeVisible (settingsButton);
     contentComponent.addAndMakeVisible (v2aModeButton);
     contentComponent.addAndMakeVisible (t2aModeButton);
 
-    // Configure duration dropdown (for T2A mode)
+    // Recommendation: the query is the video under the selection, or the sound there
+    setUpSegment (fromVideoButton, 1002, juce::Button::ConnectedOnRight);
+    setUpSegment (fromSoundButton, 1002, juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
+    setUpSegment (fromSketchButton, 1002, juce::Button::ConnectedOnLeft);
+    fromSketchButton.setTooltip ("Say or tap the sound on a track, select it, and write in the prompt what it is. "
+                                 "The words find the recordings; the sketch chooses the stretch of each one whose "
+                                 "loudness runs like yours (three taps, a swell, a fall). Nothing from the sketch's "
+                                 "timbre is used, so a voice is fine. A sound already on a track works as a sketch "
+                                 "too: an imported recording or a generated clip, and the prompt names the kind of "
+                                 "sound you want in its place (From sound instead searches for what it sounds like).");
+    fromVideoButton.setToggleState (true, juce::dontSendNotification);
+    fromVideoButton.setTooltip ("Search the archive with the video under the marked range (and the prompt, if any).");
+    fromSoundButton.setTooltip ("Search the archive with the sound under the marked range: the audio clips on the "
+                                "track(s) the selection lies on, mixed when there are several. The results point "
+                                "at the stretch of each recording that matches, and Import takes just that stretch. "
+                                "The prompt counts too. Nothing happens when no audio clip lies under the selection.");
+    recCutToggle.setToggleState (true, juce::dontSendNotification);
+    recCutToggle.setTooltip ("On: the imported recording is trimmed to the marked range; what lies beyond stays in "
+                             "the file and can be pulled out with the Trim tool. Off: the whole recording goes in "
+                             "at the start of the range (a long one onto a new track).");
+    recCutToggle.onClick = [this]
+    {
+        recHandlesToggle.setEnabled (recCutToggle.getToggleState());
+        recFadeToggle.setEnabled (recCutToggle.getToggleState());
+    };
+    recHandlesToggle.setToggleState (true, juce::dontSendNotification);
+    recHandlesToggle.setTooltip ("On: the clip has the Hybrid profile's handle length (Settings, Ambience handles) of "
+                                 "the recording before and after the range, as far as the recording allows, so it can "
+                                 "be extended on both sides with the Trim tool. A matched stretch (From sound, From "
+                                 "sketch) is fetched with that much around it; a whole recording (From video) goes in "
+                                 "that much earlier.");
+    recFadeToggle.setToggleState (true, juce::dontSendNotification);
+    recFadeToggle.setTooltip ("On: the clip gets Pro Tools' own fade-in and fade-out from the batch-fades preset of "
+                              "the Hybrid profile (Settings: Fade preset, Fade (s), Fade place). Off: no fades.");
+    for (auto* t : { &recCutToggle, &recHandlesToggle, &recFadeToggle })
+    {
+        t->setVisible (false);
+        contentComponent.addAndMakeVisible (*t);
+    }
+    fromVideoButton.onClick = [this] { recQuery = RecQuery::Video; };
+    fromSoundButton.onClick = [this] { recQuery = RecQuery::Sound; };
+    fromSketchButton.onClick = [this] { recQuery = RecQuery::Sketch; };
+    contentComponent.addAndMakeVisible (fromVideoButton);
+    contentComponent.addAndMakeVisible (fromSoundButton);
+    contentComponent.addAndMakeVisible (fromSketchButton);
     durationLabel.setJustificationType (juce::Justification::centredLeft);
     contentComponent.addAndMakeVisible (durationLabel);
     
@@ -332,8 +406,15 @@ contentComponent.addAndMakeVisible (settingsButton);
     // Set fixed window size (not resizable in Pro Tools)
     // Pro Tools plugins typically have fixed UI layouts
     setResizable (true, true);
-    setResizeLimits (400, 400, 1200, 1200);  // min/max width/height
-    setSize (750, 660);  // Width x Height in pixels; matches the content height computed in resized()
+    setResizeLimits (designWidth / 2, 300, designWidth * 2, 1400);   // the width sets the scale (50 % to 200 %)
+    // The size the user chose last time (this instance, the session or ui.json), else the designed one
+    processor.loadRememberedEditorSize();
+    if (processor.editorWidth > 0 && processor.editorHeight > 0)
+        setSize (juce::jlimit (designWidth / 2, designWidth * 2, processor.editorWidth),
+                 juce::jlimit (300, 1400, processor.editorHeight));
+    else
+        setSize (designWidth, 660);  // matches the content height computed in resized() at scale 1
+    editorReady = true;
 }
 
 //==============================================================================
@@ -512,10 +593,20 @@ void PtV2AEditor::paint (juce::Graphics& g)
 //==============================================================================
 // JUCE Component Lifecycle - Layout
 //==============================================================================
+PtV2AEditor::~PtV2AEditor()
+{
+    processor.rememberEditorSize (getWidth(), getHeight());
+}
+
 void PtV2AEditor::resized()
 {
-    // Viewport takes full editor bounds
-    viewport.setBounds (getLocalBounds());
+    if (editorReady)
+        processor.rememberEditorSize (getWidth(), getHeight());
+    // The whole content scales with the window width (half to double the designed 750 px);
+    // the height only decides how much of it is visible, the rest scrolls
+    const float scale = juce::jlimit (0.5f, 2.0f, (float) getWidth() / (float) designWidth);
+    viewport.setTransform (juce::AffineTransform::scale (scale));
+    viewport.setBounds (0, 0, designWidth, (int) std::ceil ((float) getHeight() / scale));
     
     // Rows that the current mode hides take no space, so the Sound Recommendation
     // list gets the room the generation parameters would otherwise occupy.
@@ -523,7 +614,7 @@ void PtV2AEditor::resized()
     const bool isSoundRec = currentWorkflowMode == WorkflowMode::SoundRecommendation;
     const bool isHybrid   = currentWorkflowMode == WorkflowMode::Hybrid;
     const int audioRows = (isAudioGen || isHybrid) ? 1 : 0;         // negative prompt, seed
-    const int hybridRows = isHybrid ? 2 : 0;                         // memory locations + database; keep generated + handles
+    const int hybridRows = isHybrid ? 4 : 0;                         // events source + replace; kinds; database + keep generated; handles + fade
     const int spottingRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 2 : 0;   // scenes/events, kinds
     const int promptRows = (currentWorkflowMode == WorkflowMode::AutoSpotting) ? 0 : 1;   // no prompt in Spotting
     const int toggleHeight = (isSoundRec && toggleSoundResultsButton.isVisible()) ? 28 : 0;
@@ -536,6 +627,7 @@ void PtV2AEditor::resized()
                         (20 + 28) * audioRows +  // Negative prompt row
                         (20 + 28) * audioRows +  // Seed row
                         (20 + 28) +  // Backend row (every mode)
+                        (20 + 28) * (isSoundRec ? 2 : 0) +  // Recommendation: query row, clip row (cut, handles, fade)
                         (20 + 28) * (hybridRows + spottingRows) +  // Hybrid switch rows, Spotting scene row
                         30 +  // Spacing before buttons
                         28 +  // Button row
@@ -549,9 +641,7 @@ void PtV2AEditor::resized()
                         24;   // Bottom margin
     
     // Set content component size (width matches viewport for horizontal scroll, calculated height)
-    int minContentWidth = 700;  // Minimum width to ensure all content fits
-    int actualWidth = juce::jmax (getWidth(), minContentWidth);
-    contentComponent.setSize (actualWidth, contentHeight);
+    contentComponent.setSize (viewport.getWidth(), contentHeight);   // the designed width, scaled as a whole
     
     // Layout components within contentComponent with 24px margin around edges
     auto r = contentComponent.getLocalBounds().reduced (24);
@@ -628,36 +718,35 @@ seedRow.removeFromLeft (20);
     modelLabel.setBounds (modelRow.removeFromLeft (65));
     modelRow.removeFromLeft (10);
     modelProviderComboBox.setBounds (modelRow.removeFromLeft (230));
+    // Video track: [list] at the right end of the same row (every mode)
+    modelRow.removeFromLeft (10);
+    auto trackArea = modelRow.removeFromRight (juce::jmin (270, modelRow.getWidth()));
+    videoTrackComboBox.setBounds (trackArea.removeFromRight (juce::jmin (175, juce::jmax (0, trackArea.getWidth() - 90))));
+    trackArea.removeFromRight (6);
+    videoTrackLabel.setBounds (trackArea);
 
-    // Hybrid: the event switches and the database switches under the backend row (collapsed elsewhere)
-    const int hybridRowHeight = isHybrid ? 28 : 0;
-    r.removeFromTop (isHybrid ? 20 : 0);
-    auto memoryRow = r.removeFromTop (hybridRowHeight);
-    memoryRow.removeFromLeft (75);
-    useMemoryLocationsToggle.setBounds (memoryRow.removeFromLeft (230));
-    memoryRow.removeFromLeft (20);
-    useDatabaseSoundsToggle.setBounds (memoryRow);
-    r.removeFromTop (isHybrid ? 20 : 0);
-    auto databaseRow = r.removeFromTop (hybridRowHeight);
-    databaseRow.removeFromLeft (75);
-    keepGeneratedToggle.setBounds (databaseRow.removeFromLeft (230));
-    databaseRow.removeFromLeft (20);
-    ambienceHandlesToggle.setBounds (databaseRow.removeFromLeft (230));
-    databaseRow.removeFromLeft (20);
-    autoFadeToggle.setBounds (databaseRow);
-    // Spotting: the scene switch alone under the backend row
-    const bool isSpottingMode = currentWorkflowMode == WorkflowMode::AutoSpotting;
-    r.removeFromTop (isSpottingMode ? 20 : 0);
-    auto scenesRow = r.removeFromTop (isSpottingMode ? 28 : 0);
-    scenesRow.removeFromLeft (75);
-    if (isSpottingMode)
+    // Recommendation: From video | From sound under the backend row
+    if (isSoundRec)
     {
-        detectScenesToggle.setBounds (scenesRow.removeFromLeft (230));
-        scenesRow.removeFromLeft (20);
-        detectEventsToggle.setBounds (scenesRow);
         r.removeFromTop (20);
-        // Each kind gets the width its own text needs (box plus label), from the left edge
-        auto kindsRow = r.removeFromTop (28);
+        auto queryRow = r.removeFromTop (28);
+        queryRow.removeFromLeft (75);
+        fromVideoButton.setBounds (queryRow.removeFromLeft (110));
+        fromSoundButton.setBounds (queryRow.removeFromLeft (110));
+        fromSketchButton.setBounds (queryRow.removeFromLeft (110));
+        r.removeFromTop (20);
+        auto clipRow = r.removeFromTop (28);
+        clipRow.removeFromLeft (75);
+        recCutToggle.setBounds (clipRow.removeFromLeft (170));
+        clipRow.removeFromLeft (20);
+        recHandlesToggle.setBounds (clipRow.removeFromLeft (130));
+        clipRow.removeFromLeft (20);
+        recFadeToggle.setBounds (clipRow.removeFromLeft (110));
+    }
+    const bool isSpottingMode = currentWorkflowMode == WorkflowMode::AutoSpotting;
+    // The five kinds, each as wide as its own text (box plus label), flush with the switches above
+    auto layoutKinds = [this] (juce::Rectangle<int> kindsRow)
+    {
         eventKindsLabel.setBounds ({});                 // the row above says what these are
         const juce::Font kindsFont (14.0f);
         for (auto* t : { &ambienceToggle, &foleyToggle, &sfxToggle, &musicToggle, &dialogueToggle })
@@ -665,6 +754,47 @@ seedRow.removeFromLeft (20);
             const int wanted = kindsFont.getStringWidth (t->getButtonText()) + 34;
             t->setBounds (kindsRow.removeFromLeft (juce::jmin (wanted, kindsRow.getWidth())));
         }
+    };
+    if (isHybrid)
+    {
+        // Events: where they come from and which kinds; then the database switches
+        r.removeFromTop (20);
+        auto eventsRow = r.removeFromTop (28);
+        eventsRow.removeFromLeft (75);
+        eventsSourceLabel.setBounds (eventsRow.removeFromLeft (58));
+        eventsSourceBox.setBounds (eventsRow.removeFromLeft (190));
+        eventsRow.removeFromLeft (20);
+        replaceEarlierToggle.setBounds (eventsRow);
+        r.removeFromTop (20);
+        auto kindsRow = r.removeFromTop (28);
+        kindsRow.removeFromLeft (75);
+        layoutKinds (kindsRow);
+        r.removeFromTop (20);
+        auto databaseRow = r.removeFromTop (28);
+        databaseRow.removeFromLeft (75);
+        useDatabaseSoundsToggle.setBounds (databaseRow.removeFromLeft (230));
+        databaseRow.removeFromLeft (20);
+        keepGeneratedToggle.setBounds (databaseRow);
+        r.removeFromTop (20);
+        auto handlesRow = r.removeFromTop (28);
+        handlesRow.removeFromLeft (75);
+        ambienceHandlesToggle.setBounds (handlesRow.removeFromLeft (230));
+        handlesRow.removeFromLeft (20);
+        autoFadeToggle.setBounds (handlesRow);
+    }
+    if (isSpottingMode)
+    {
+        // Spotting: the scene and event switches under the backend row, then the kinds
+        r.removeFromTop (20);
+        auto scenesRow = r.removeFromTop (28);
+        scenesRow.removeFromLeft (75);
+        detectScenesToggle.setBounds (scenesRow.removeFromLeft (230));
+        scenesRow.removeFromLeft (20);
+        detectEventsToggle.setBounds (scenesRow);
+        r.removeFromTop (20);
+        auto kindsRow = r.removeFromTop (28);
+        kindsRow.removeFromLeft (75);
+        layoutKinds (kindsRow);
     }
 
 
@@ -692,7 +822,7 @@ seedRow.removeFromLeft (20);
     // Spotting only: whole-track button under the action button
     r.removeFromTop (8);
     auto spotAllRow = r.removeFromTop (28);
-    const int spotAllW = 200;
+    const int spotAllW = juce::jmin (200, spotAllRow.getWidth());
     spotAllRow.removeFromLeft ((spotAllRow.getWidth() - spotAllW) / 2);
     spotWholeTrackButton.setBounds (spotAllRow.removeFromLeft (spotAllW));
     hybridWholeTrackButton.setBounds (spotWholeTrackButton.getBounds());
@@ -814,9 +944,50 @@ void PtV2AEditor::startTimelineSelectionReadOnly()
 // Async PTSL - Cursor Position Read (T2A workflow)
 
 
+void PtV2AEditor::setProgressTarget (double value)
+{
+    const auto now = juce::Time::getCurrentTime();
+    if (value >= 0.0 && progressTarget >= 0.0 && value < progressTarget)
+        return;                                                 // a report behind the bar: within a run it never steps back
+    if (value < 0.0 || progressTarget < 0.0)
+    {
+        // A run starting or a busy phase: no glide from here yet
+        progressTarget = value;
+        progressStepSize = 0.0;
+        progressStepSeconds = 0.0;
+        progressTargetTime = now;
+        progressValue = value;
+        return;
+    }
+    if (value > progressTarget)
+    {
+        const double seconds = (now - progressTargetTime).inSeconds();
+        progressStepSeconds = progressStepSeconds > 0.0 ? juce::jmax (seconds, 0.75 * progressStepSeconds + 0.25 * seconds) : seconds;
+        progressStepSize = value - progressTarget;
+        progressTarget = value;
+        progressTargetTime = now;
+    }
+    progressValue = juce::jmax (progressValue, value);      // the glide may already be ahead; never step back
+}
+
+void PtV2AEditor::animateProgress()
+{
+    if (progressTarget < 0.0 || progressTarget >= 1.0 || progressStepSize <= 0.0 || progressStepSeconds <= 0.0
+        || ! progressBar.isVisible())
+        return;
+    // Asymptotic: at most half of the next step, approached with the time constant of the
+    // previous steps (at least 20 s), so a fast start (cutting, frames) cannot send the bar
+    // ahead of a slow model call that follows
+    const double elapsed = (juce::Time::getCurrentTime() - progressTargetTime).inSeconds();
+    const double tau = juce::jmax (20.0, progressStepSeconds);
+    const double share = 0.5 * (1.0 - std::exp (-elapsed / tau));
+    progressValue = juce::jlimit (progressTarget, 1.0, juce::jmax (progressValue, progressTarget + progressStepSize * share));
+}
+
 void PtV2AEditor::timerCallback()
 {
     auto elapsed = juce::Time::getCurrentTime() - asyncOperationStartTime;
+    animateProgress();
     
     // Handle different async states
     switch (currentAsyncState)
@@ -1019,6 +1190,35 @@ void PtV2AEditor::timerCallback()
         
         case AsyncState::GeneratingAudio:
         {
+            // A single generation through the gateway reports its windows; the bar appears
+            // once there is more than one (a whole-track run has its own segment bar)
+            if (pendingSegments.isEmpty())
+            {
+                updateSpottingProgress();
+                if (lastProgressTotal > 1 && ! progressBar.isVisible())
+                {
+                    progressBar.setVisible (true);
+                    progressLabel.setVisible (true);
+                }
+                if (lastProgressTotal > 1 && lastProgressCurrent > 0)
+                {
+                    // Parts are alike: run linearly through the current one at the pace of the
+                    // previous parts, never past 95 % of it before the next part is reported
+                    const auto now = juce::Time::getCurrentTime();
+                    if (lastProgressCurrent != generationPart)
+                    {
+                        if (generationPart > 0)
+                        {
+                            const double took = (now - generationPartStart).inSeconds() / juce::jmax (1, lastProgressCurrent - generationPart);
+                            generationSecondsPerPart = juce::jlimit (2.0, 600.0, took);
+                        }
+                        generationPart = lastProgressCurrent;
+                        generationPartStart = now;
+                    }
+                    const double within = juce::jmin (0.95, (now - generationPartStart).inSeconds() / generationSecondsPerPart);
+                    progressValue = juce::jmax (progressValue, juce::jlimit (0.0, 1.0, (generationPart - 1 + within) / lastProgressTotal));
+                }
+            }
             // Poll for output file existence
             checkAudioGenerationComplete();
             break;
@@ -1410,6 +1610,8 @@ void PtV2AEditor::timerCallback()
                     message += "; " + juce::String (scenes) + (scenes == 1 ? " scene" : " scenes") + " as memory locations";
                 if (failedClips > 0)
                     message += "; " + juce::String (failedClips) + " clip(s) failed, see the log";
+                if (const auto warned = warningsOf (json); warned.isNotEmpty())
+                    message += ". " + warned;
                 showStatus (message, failedClips > 0 || placed < sounds || dbPlaced < dbPieces);
             }
             else if (success)
@@ -1429,6 +1631,8 @@ void PtV2AEditor::timerCallback()
                                        + " sound events in " + juce::String (clips) + (clips == 1 ? " clip" : " clips");
                 if (failedClips > 0)
                     message += "; " + juce::String (failedClips) + " clip(s) failed, see the log";
+                if (const auto warned = warningsOf (json); warned.isNotEmpty())
+                    message += ". " + warned;
                 if (fellBack > 0)
                     message += "; " + juce::String (fellBack) + " on the main ruler (marker ruler missing)";
                 if (model.isNotEmpty())
@@ -1802,7 +2006,7 @@ void PtV2AEditor::startAudioGeneration (const juce::String& videoPath, const juc
     // Read advanced parameters from UI
     juce::String negativePrompt = negativePromptInput.getText().trim();
     if (negativePrompt.isEmpty())
-        negativePrompt = "voices, music";  // Default if empty
+        negativePrompt = "voices, music, melody, singing, speech, interference";   // the placeholder's list
     
     juce::String seedText = seedInput.getText().trim();
     int seed = seedText.isEmpty() ? -1 : seedText.getIntValue();  // -1: random, drawn by the companion
@@ -1857,6 +2061,7 @@ void PtV2AEditor::startAudioGeneration (const juce::String& videoPath, const juc
     // Switch to GeneratingAudio state
     currentAsyncState = AsyncState::GeneratingAudio;
     asyncOperationStartTime = juce::Time::getCurrentTime();
+    watchGenerationProgress();
     
     // Timer is already running from previous state, just continue polling
     if (!isTimerRunning())
@@ -1879,7 +2084,7 @@ void PtV2AEditor::startT2AAudioGeneration (const juce::String& promptText, float
     // Read advanced parameters from UI
     juce::String negativePrompt = negativePromptInput.getText().trim();
     if (negativePrompt.isEmpty())
-        negativePrompt = "voices, music";  // Default if empty
+        negativePrompt = "voices, music, melody, singing, speech, interference";   // the placeholder's list
     
     juce::String seedText = seedInput.getText().trim();
     int seed = seedText.isEmpty() ? -1 : seedText.getIntValue();  // -1: random, drawn by the companion
@@ -1920,6 +2125,7 @@ void PtV2AEditor::startT2AAudioGeneration (const juce::String& promptText, float
     // Switch to GeneratingAudio state (same polling as V2A)
     currentAsyncState = AsyncState::GeneratingAudio;
     asyncOperationStartTime = juce::Time::getCurrentTime();
+    watchGenerationProgress();
     
     // Start timer to poll for output file
     if (!isTimerRunning())
@@ -2085,6 +2291,7 @@ void PtV2AEditor::checkAudioGenerationComplete()
         
         stopTimer();
         actionButton.setButtonText ("Importing Audio...");
+        endGenerationProgress();
         updateSegmentProgress ("importing");
         
         // Sound search now triggered manually via "Recommend Sounds" button
@@ -2120,6 +2327,7 @@ void PtV2AEditor::checkAudioGenerationComplete()
         
         stopTimer();
         actionButton.setButtonText ("Importing Audio...");
+        endGenerationProgress();
         updateSegmentProgress ("importing");
         
         // Sound search now triggered manually via "Recommend Sounds" button
@@ -2152,6 +2360,7 @@ void PtV2AEditor::checkAudioGenerationComplete()
 
         stopTimer();
         currentAsyncState = AsyncState::Idle;
+        endGenerationProgress();
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon, "Generation Failed",
             "The backend did not return audio.\n\n" + reason.substring (0, 300)
@@ -2345,6 +2554,7 @@ void PtV2AEditor::startVideoSegmentResolve (ResolveTarget target)
     // python -X utf8 standalone_api_client.py --action resolve_video_segments
     juce::StringArray args { processor.getPythonExecutable(), "-X", "utf8", scriptFile.getFullPathName(),
                              "--action", "resolve_video_segments" };
+    addVideoTrackArg (args);
     juce::Logger::writeToLog ("Resolving video segments: " + args.joinIntoString (" "));
 
     ptslProcess = std::make_unique<juce::ChildProcess>();
@@ -2361,8 +2571,43 @@ void PtV2AEditor::startVideoSegmentResolve (ResolveTarget target)
 
     actionButton.setEnabled (false);
     actionButton.setButtonText ("Reading selection...");
-    progressValue = -1.0;   // no measurable progress yet: busy animation
+    setProgressTarget (-1.0);   // no measurable progress yet: busy animation
     progressLabel.setText ("Looking up the video clips under the selection...", juce::dontSendNotification);
+    progressBar.setVisible (true);
+    progressLabel.setVisible (true);
+    currentAsyncState = AsyncState::ResolvingVideoSegments;
+    asyncOperationStartTime = juce::Time::getCurrentTime();
+    startTimer (TIMER_INTERVAL_MS);
+}
+
+void PtV2AEditor::startSelectionAudioExport()
+{
+    resolveTarget = ResolveTarget::SoundSearchAudio;
+    auto scriptFile = processor.getAPIClientScript();
+    if (! scriptFile.existsAsFile())
+    {
+        showStatus ("API client script not found; check the plugin installation.", true);
+        resetActionUi();
+        return;
+    }
+    currentAudioQueryPath = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                .getChildFile ("ai_sound_design_query_" + juce::String (juce::Time::currentTimeMillis()) + ".wav")
+                                .getFullPathName();
+    juce::StringArray args { processor.getPythonExecutable(), "-X", "utf8", scriptFile.getFullPathName(),
+                             "--action", "export_selection_audio", "--output", currentAudioQueryPath };
+    juce::Logger::writeToLog ("Selection audio: " + args.joinIntoString (" "));
+    ptslProcess = std::make_unique<juce::ChildProcess>();
+    if (! ptslProcess->start (args))
+    {
+        ptslProcess.reset();
+        showStatus ("Could not start the Python process that reads the selection.", true);
+        resetActionUi();
+        return;
+    }
+    actionButton.setEnabled (false);
+    actionButton.setButtonText ("Reading selection...");
+    setProgressTarget (-1.0);
+    progressLabel.setText ("Reading the audio under the selection...", juce::dontSendNotification);
     progressBar.setVisible (true);
     progressLabel.setVisible (true);
     currentAsyncState = AsyncState::ResolvingVideoSegments;
@@ -2381,16 +2626,45 @@ void PtV2AEditor::handleVideoSegmentsResult (const juce::String& output)
     bool success = (bool) json.getProperty ("success", false);
     juce::String error = json.getProperty ("error", "").toString();
     auto segments = json.getProperty ("segments", juce::var());
+    resolveWarnings = warningsOf (json);
+    if (resolveWarnings.isNotEmpty())
+        juce::Logger::writeToLog ("Video segments: " + resolveWarnings);
 
+    if (resolveTarget == ResolveTarget::SoundSearchAudio)
+    {
+        progressBar.setVisible (false);
+        progressLabel.setVisible (false);
+        if (! success)
+        {
+            // No audio under the selection: said in the status line, no run (the user
+            // chose "From sound" on purpose; "From video" is one click away)
+            juce::Logger::writeToLog ("Search by sound: " + error);
+            showStatus ("From sound: " + error, true);
+            resetActionUi();
+            return;
+        }
+        currentAudioQueryPath = json.getProperty ("audio_path", currentAudioQueryPath).toString();
+        timelineInTime = json.getProperty ("in_time", "").toString();
+        juce::StringArray names;
+        if (auto* clips = json.getProperty ("clips", juce::var()).getArray())
+            for (const auto& c : *clips)
+                names.add (c.getProperty ("clip_name", "").toString());
+        const bool sketch = recQuery == RecQuery::Sketch;
+        const juce::String seconds = juce::String ((double) json.getProperty ("duration_seconds", 0.0), 1) + " s";
+        showStatus ((sketch ? "Searching \"" + currentPrompt.trim() + "\" shaped like the sketch "
+                            : "Searching by the sound of ") + names.joinIntoString (", ") + " (" + seconds + ")"
+                    + (resolveWarnings.isNotEmpty() ? "; " + resolveWarnings : juce::String()), false);
+        triggerSoundSearch ("", currentPrompt, "", 0.0f, 0.0f, -1.0f, -1.0f, false, currentAudioQueryPath, sketch);
+        if (! isTimerRunning())
+            startTimer (TIMER_INTERVAL_MS);
+        return;
+    }
     if (resolveTarget == ResolveTarget::SoundSearch)
     {
         progressBar.setVisible (false);
         progressLabel.setVisible (false);
-
         if (! success)
         {
-            // No video under the selection (or no selection): search by text alone,
-            // as the search always did when no video was available.
             juce::Logger::writeToLog ("Sound search without video: " + error);
             triggerSoundSearch ("", currentPrompt, "", 0.0f, 0.0f, -1.0f, -1.0f, false);
             return;
@@ -2509,7 +2783,7 @@ void PtV2AEditor::updateSegmentProgress (const juce::String& stage)
         return;
 
     auto seg = pendingSegments[juce::jlimit (0, total - 1, currentSegmentIndex)];
-    progressValue = total > 1 ? (double) currentSegmentIndex / total : -1.0;   // -1: busy animation, no percentage from the backend
+    setProgressTarget (total > 1 ? (double) currentSegmentIndex / total : -1.0);   // -1: busy animation, no percentage from the backend
     progressLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     progressLabel.setText ("Clip " + juce::String (currentSegmentIndex + 1) + " of " + juce::String (total) + ": "
                                + seg.getProperty ("clip_name", "").toString() + "  (" + stage + ")",
@@ -2531,6 +2805,8 @@ void PtV2AEditor::finishSegmentGeneration (bool report)
                  + " generated" + (track.isNotEmpty() ? " on track '" + track + "'" : juce::String());
         if (! skippedSegments.isEmpty())
             status += ". Skipped: " + skippedSegments.joinIntoString ("; ");
+        if (resolveWarnings.isNotEmpty())
+            status += ". " + resolveWarnings;
 
         if (segmentsGenerated == 0)
             juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Nothing Generated",
@@ -2597,6 +2873,123 @@ juce::String PtV2AEditor::modeDescription (WorkflowMode mode) const
     }
 }
 
+juce::String PtV2AEditor::chosenVideoTrack() const
+{
+    const int index = videoTrackComboBox.getSelectedId() - 2;
+    return index >= 0 && index < videoTrackNames.size() ? videoTrackNames[index] : juce::String();
+}
+
+void PtV2AEditor::addVideoTrackArg (juce::StringArray& args) const
+{
+    if (const auto track = chosenVideoTrack(); track.isNotEmpty())
+    {
+        args.add ("--video-track");
+        args.add (track);
+    }
+}
+
+juce::String PtV2AEditor::warningsOf (const juce::var& json)
+{
+    juce::StringArray lines;
+    if (auto* array = json.getProperty ("warnings", juce::var()).getArray())
+        for (const auto& w : *array)
+            if (w.toString().isNotEmpty())
+                lines.add (w.toString());
+    return lines.joinIntoString ("; ");
+}
+
+bool PtV2AEditor::requestVideoTracks()
+{
+    // Called when the user opens the list: the session is asked every time (a track may
+    // have been added or renamed meanwhile) and the list opens by itself when the answer
+    // is in; videoTracksFresh is set only for that programmatic opening
+    if (videoTracksFresh)
+        return true;
+    auto scriptFile = processor.getAPIClientScript();
+    if (! scriptFile.existsAsFile())
+        return true;
+    openVideoTrackList = true;
+    videoTrackComboBox.setText ("reading tracks...", juce::dontSendNotification);
+    refreshVideoTracks();
+    return false;
+}
+
+void PtV2AEditor::refreshVideoTracks()
+{
+    // The session's video tracks, asked of Pro Tools through the companion on a background
+    // thread. Pro Tools serves PTSL from its message thread, the same one this editor runs
+    // on, so waiting here for the answer would stop Pro Tools and the companion together.
+    // Only ever called on the user's request (see requestVideoTracks): a PTSL request
+    // while Pro Tools loads a session or shows a dialog has crashed it
+    auto scriptFile = processor.getAPIClientScript();
+    if (! scriptFile.existsAsFile())
+        return;
+    const int request = ++videoTracksRequest;
+    juce::StringArray args { processor.getPythonExecutable(), "-X", "utf8", scriptFile.getFullPathName(),
+                             "--action", "list_video_tracks" };
+    juce::Component::SafePointer<PtV2AEditor> safeThis (this);
+    juce::Thread::launch ([safeThis, args, request]
+    {
+        juce::ChildProcess process;
+        juce::String output;
+        if (process.start (args))
+        {
+            output = process.readAllProcessOutput();
+            process.waitForProcessToFinish (6000);
+        }
+        juce::String jsonLine;
+        for (const auto& line : juce::StringArray::fromLines (output))
+            if (line.trim().startsWith ("{"))
+                jsonLine = line.trim();
+        auto json = juce::JSON::parse (jsonLine);
+        juce::StringArray names;
+        const bool ok = (bool) json.getProperty ("success", false);
+        if (ok)
+        {
+            if (auto* array = json.getProperty ("tracks", juce::var()).getArray())
+                for (const auto& name : *array)
+                    names.add (name.toString());
+        }
+        else
+            juce::Logger::writeToLog ("Video tracks: " + (jsonLine.isEmpty() ? juce::String ("no answer") : jsonLine));
+        juce::MessageManager::callAsync ([safeThis, names, ok, request]
+        {
+            if (safeThis == nullptr || request != safeThis->videoTracksRequest)
+                return;
+            if (ok)
+                safeThis->setVideoTracks (names);
+            else
+                safeThis->setVideoTracks (safeThis->videoTrackNames);   // the old list, the text restored
+            if (safeThis->openVideoTrackList)
+            {
+                safeThis->openVideoTrackList = false;
+                if (safeThis->isShowing())
+                {
+                    safeThis->videoTracksFresh = true;              // open what we have, no second request
+                    safeThis->videoTrackComboBox.showPopup();
+                    safeThis->videoTracksFresh = false;
+                }
+            }
+        });
+    });
+}
+
+void PtV2AEditor::setVideoTracks (const juce::StringArray& names)
+{
+    const juce::String keep = chosenVideoTrack();
+    videoTrackNames = names;
+    videoTrackComboBox.clear (juce::dontSendNotification);
+    videoTrackComboBox.addItem ("Topmost", 1);
+    int selected = 1;
+    for (int i = 0; i < videoTrackNames.size(); ++i)
+    {
+        videoTrackComboBox.addItem (videoTrackNames[i], i + 2);
+        if (videoTrackNames[i] == keep)
+            selected = i + 2;
+    }
+    videoTrackComboBox.setSelectedId (selected, juce::dontSendNotification);
+}
+
 void PtV2AEditor::resetActionUi()
 {
     actionButton.setEnabled (true);
@@ -2646,7 +3039,7 @@ void PtV2AEditor::handleGenerationModeChange()
 bool PtV2AEditor::tunnelTokenPresent (const juce::String& action)
 {
     auto settings = processor.getBackendSettings();
-    if (! settings.useTunnel || settings.clientSecret.isNotEmpty())
+    if (! settings.useTunnel || settings.tunnelTokenPresent())
         return true;
 
     juce::AlertWindow::showMessageBoxAsync (
@@ -2664,7 +3057,7 @@ void PtV2AEditor::updateBackendStatus()
     // Local backends need no token. Only a tunnel without a saved token is a
     // configuration the user has to act on before anything can work.
     auto settings = processor.getBackendSettings();
-    const bool tokenMissing = settings.useTunnel && settings.clientSecret.isEmpty();
+    const bool tokenMissing = settings.useTunnel && ! settings.tunnelTokenPresent();
 
     apiWarningLabel.setText (juce::CharPointer_UTF8 ("\xe2\x9a\xa0 Tunnel enabled, token missing"),
                              juce::dontSendNotification);
@@ -2717,7 +3110,9 @@ void PtV2AEditor::handleWorkflowModeChange()
 
     seedInput.setVisible (isAudioGen || isHybrid);
     seedLabel.setVisible (isAudioGen || isHybrid);
-    useMemoryLocationsToggle.setVisible (isHybrid);
+    eventsSourceLabel.setVisible (isHybrid);
+    eventsSourceBox.setVisible (isHybrid);
+    replaceEarlierToggle.setVisible (isHybrid);
     useDatabaseSoundsToggle.setVisible (isHybrid);
     keepGeneratedToggle.setVisible (isHybrid);
     ambienceHandlesToggle.setVisible (isHybrid);
@@ -2726,14 +3121,18 @@ void PtV2AEditor::handleWorkflowModeChange()
     detectEventsToggle.setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting);
     eventKindsLabel.setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting);
     for (auto* t : { &dialogueToggle, &foleyToggle, &sfxToggle, &ambienceToggle, &musicToggle })
-        t->setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting);
+        t->setVisible (currentWorkflowMode == WorkflowMode::AutoSpotting || isHybrid);
+    updateKindsEnabled();
     
     // V2A/T2A toggle only visible in Sound Generation (not used in Sound Recommendation)
     // Sound Search automatically tries video detection first, then falls back to text-only
     v2aModeButton.setVisible (isAudioGen);
     t2aModeButton.setVisible (isAudioGen);
-    
-    // Duration and model always visible in Audio Gen (enabled state controlled by V2A/T2A)
+    fromVideoButton.setVisible (isSoundRec);
+    fromSoundButton.setVisible (isSoundRec);
+    fromSketchButton.setVisible (isSoundRec);
+    for (auto* t : { &recCutToggle, &recHandlesToggle, &recFadeToggle })
+        t->setVisible (isSoundRec);
     durationComboBox.setVisible (isAudioGen);
     durationLabel.setVisible (isAudioGen);
     
@@ -2829,9 +3228,10 @@ void PtV2AEditor::applyAdapterCapabilities()
     if (currentWorkflowMode == WorkflowMode::Hybrid)
     {
         const bool memory = ! known || adapter.supportsFeature ("memory_locations");
-        useMemoryLocationsToggle.setEnabled (memory);
+        eventsSourceBox.setEnabled (memory);
         if (! memory)
-            useMemoryLocationsToggle.setToggleState (false, juce::dontSendNotification);
+            eventsSourceBox.setSelectedId (1, juce::dontSendNotification);
+        updateKindsEnabled();
         // Database sounds: the profile must claim it, and the backend's health must confirm it
         // (search service reachable, audio index present); asked in the background.
         const bool claimed = ! known || adapter.supportsFeature ("database_match");
@@ -2872,14 +3272,15 @@ void PtV2AEditor::applyAdapterCapabilities()
 
 void PtV2AEditor::refreshBackendAvailability()
 {
-    struct Probe { juce::String kind, name, url; };
+    struct Probe { juce::String kind, name, url, file; };
     std::vector<Probe> probes;
     const bool tunnel = processor.getBackendSettings().useTunnel;
     for (auto* kind : { "spotting", "generation", "search", "hybrid" })
     {
         auto adapter = processor.getSelectedAdapter (kind);
         probes.push_back ({ kind, adapter.name,
-                            adapter.isValid() ? adapter.activeUrl (tunnel) + adapter.health : juce::String() });
+                            adapter.isValid() ? adapter.activeUrl (tunnel) + adapter.health : juce::String(),
+                            adapter.file });
     }
     const int request = ++availabilityRequest;
     juce::Component::SafePointer<PtV2AEditor> safeThis (this);
@@ -2901,22 +3302,37 @@ void PtV2AEditor::refreshBackendAvailability()
             else
             {
                 int status = 0;
+                juce::String body;
                 auto stream = juce::URL (probe.url).createInputStream (
                     juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
                         .withConnectionTimeoutMs (3000).withStatusCode (&status));
                 if (stream != nullptr)
-                    stream->readEntireStreamAsString();
+                    body = stream->readEntireStreamAsString();
                 state.available = stream != nullptr && status >= 200 && status < 300;
                 if (! state.available)
                     state.reason = probe.name + " does not answer at " + probe.url
                                    + (status > 0 ? " (" + juce::String (status) + ")" : juce::String());
+                // A generation backend's health names the lengths it accepts (the gateway: up to
+                // its own maximum, not the model's window); they outrank the profile's block
+                else if (probe.kind == "generation")
+                    PtV2AProcessor::parseDurationLimits (body, state.minSeconds, state.maxSeconds);
             }
             results[probe.kind] = state;
         }
-        juce::MessageManager::callAsync ([safeThis, request, results]
+        juce::MessageManager::callAsync ([safeThis, request, results, probes]
         {
             if (safeThis == nullptr || request != safeThis->availabilityRequest)
                 return;                                    // a newer probe superseded this one
+            for (const auto& probe : probes)
+                if (const auto found = results.find (probe.kind); probe.kind == "generation"
+                    && found != results.end() && found->second.maxSeconds > 0.0)
+                {
+                    const auto before = safeThis->currentAdapter();
+                    safeThis->processor.setReportedDurationLimits (probe.file, found->second.minSeconds, found->second.maxSeconds);
+                    if (before.isValid() && before.file == probe.file
+                        && (before.minDuration != found->second.minSeconds || before.maxDuration != found->second.maxSeconds))
+                        safeThis->refreshAdapterCombo();   // the T2A length list follows the backend's word
+                }
             // A backend that is busy (generating, matching) may miss one probe; only two
             // misses in a row grey a mode out, and a mode whose script is running is never
             // greyed by its own load.
@@ -2943,6 +3359,16 @@ void PtV2AEditor::refreshBackendAvailability()
             });
         });
     });
+}
+
+void PtV2AEditor::updateKindsEnabled()
+{
+    // Spotting: the kinds follow "Detect events"; Hybrid: they matter unless markers alone decide
+    const bool enabled = currentWorkflowMode == WorkflowMode::Hybrid
+                             ? ! (eventsSourceBox.isEnabled() && eventsSourceBox.getSelectedId() == 3)
+                             : detectEventsToggle.getToggleState();
+    for (auto* t : { &dialogueToggle, &foleyToggle, &sfxToggle, &ambienceToggle, &musicToggle })
+        t->setEnabled (enabled);
 }
 
 void PtV2AEditor::applyBackendAvailability()
@@ -3085,7 +3511,10 @@ void PtV2AEditor::startSoundPreview (const SoundResult& sound)
     // from the server's content type because the decoder is chosen by extension.
     auto cacheDir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("ai_sound_design_previews");
     cacheDir.createDirectory();
-    for (const auto& entry : juce::RangedDirectoryIterator (cacheDir, false, "preview_" + juce::String (sound.id) + ".*"))
+    const bool stretch = sound.offsetSeconds >= 0.0f && sound.lengthSeconds > 0.0f;
+    const juce::String cacheStem = "preview_" + juce::String (sound.id)
+                                   + (stretch ? "_" + juce::String ((int) (sound.offsetSeconds * 10.0f)) : juce::String());
+    for (const auto& entry : juce::RangedDirectoryIterator (cacheDir, false, cacheStem + ".*"))
     {
         if (entry.getFile().getSize() > 0 && processor.startSoundPreview (entry.getFile().getFullPathName()))
         {
@@ -3093,14 +3522,13 @@ void PtV2AEditor::startSoundPreview (const SoundResult& sound)
             return;
         }
     }
-    auto target = cacheDir.getChildFile ("preview_" + juce::String (sound.id) + ".mp3");
-
-    // Fetch <sound_search>/sounds/<id>/preview off the message thread, then play.
+    auto target = cacheDir.getChildFile (cacheStem + (stretch ? ".wav" : ".mp3"));
     auto settings = processor.getBackendSettings();
-    juce::URL url (processor.getConfiguredAPIUrl ("sound_search").trimCharactersAtEnd ("/") + "/sounds/" + juce::String (sound.id) + "/preview");
-    juce::String headers;
-    if (settings.useTunnel && settings.clientSecret.isNotEmpty())
-        headers = "CF-Access-Client-Id: " + settings.clientId + "\r\nCF-Access-Client-Secret: " + settings.clientSecret + "\r\n";
+    const juce::String base = processor.getConfiguredAPIUrl ("sound_search").trimCharactersAtEnd ("/") + "/sounds/" + juce::String (sound.id);
+    juce::URL url (stretch ? base + "/snippet?start=" + juce::String (sound.offsetSeconds, 3)
+                                 + "&length=" + juce::String (juce::jmin (sound.lengthSeconds, 15.0f), 3)
+                           : base + "/preview");
+    juce::String headers = settings.tunnelHeaderBlock();
 
     soundRecommendations.setPreviewLoading (sound.id);
     juce::Component::SafePointer<PtV2AEditor> safeThis (this);
@@ -3197,7 +3625,25 @@ void PtV2AEditor::handleSoundDownload (const SoundResult& sound)
     commandArray.add ("--output-json");
     commandArray.add (expectedSoundDownloadOutputPath);
     commandArray.add ("--quiet");
-    
+    pendingHandleBefore = 0.0f;
+    if (sound.offsetSeconds >= 0.0f && sound.lengthSeconds > 0.0f)
+    {
+        // A search by sound: fetch the matched stretch as a WAV snippet, not the whole file;
+        // with handles, the Hybrid profile's handle length before and after it (as much
+        // before as the recording has), so the trimmed clip can be extended on both sides
+        float offset = sound.offsetSeconds, length = sound.lengthSeconds;
+        if (recCutToggle.getToggleState() && recHandlesToggle.getToggleState())
+        {
+            const float handle = (float) juce::jmax (0.0, clipSettings().ambienceHandleSeconds);
+            pendingHandleBefore = juce::jmin (handle, offset);
+            offset -= pendingHandleBefore;
+            length += pendingHandleBefore + handle;
+        }
+        commandArray.add ("--offset-seconds");
+        commandArray.add (juce::String (offset, 3));
+        commandArray.add ("--length-seconds");
+        commandArray.add (juce::String (length, 3));
+    }
     juce::Logger::writeToLog ("Starting sound download process...");
     juce::Logger::writeToLog ("Command: " + commandArray.joinIntoString (" "));
     
@@ -3344,6 +3790,13 @@ void PtV2AEditor::addImportTargetArgs (juce::StringArray& commandArray, const ju
     }
 }
 
+AdapterProfile PtV2AEditor::clipSettings() const
+{
+    // The handle length, fade preset, fade length and fade place are the Hybrid profile's
+    // match settings; without a hybrid profile the struct's defaults apply
+    return processor.getSelectedAdapter ("hybrid");
+}
+
 juce::String PtV2AEditor::currentImportClipLabel() const
 {
     juce::String base;
@@ -3389,6 +3842,34 @@ void PtV2AEditor::startSoundImportProcess (const SoundResult& sound, const juce:
         {
             commandArray.add ("--timecode-out");
             commandArray.add (currentTimecodeOut);
+            if (recCutToggle.getToggleState())
+            {
+                // As in Hybrid: trimmed to the range, the handle before it, Pro Tools' fades
+                const auto clip = clipSettings();
+                commandArray.add ("--cut");
+                if (recHandlesToggle.getToggleState())
+                {
+                    // A matched stretch: the handle fetched before it. A whole recording: the
+                    // profile's handle length; it goes in that much earlier, as far as its
+                    // length allows, so its first seconds lie before the range
+                    const bool stretch = sound.offsetSeconds >= 0.0f && sound.lengthSeconds > 0.0f;
+                    const float handle = stretch ? pendingHandleBefore : (float) juce::jmax (0.0, clip.ambienceHandleSeconds);
+                    if (handle > 0.0f)
+                    {
+                        commandArray.add ("--handle-before");
+                        commandArray.add (juce::String (handle, 3));
+                    }
+                }
+                if (recFadeToggle.getToggleState() && clip.fadePreset.trim().isNotEmpty())
+                {
+                    commandArray.add ("--fade-preset");
+                    commandArray.add (clip.fadePreset.trim());
+                    commandArray.add ("--fade-seconds");
+                    commandArray.add (juce::String (clip.fadeSeconds, 2));
+                    if (clip.fadeInside)
+                        commandArray.add ("--fade-inside");
+                }
+            }
         }
     }
     else
@@ -3445,7 +3926,9 @@ void PtV2AEditor::triggerSoundSearch (
     float timelineEnd,
     float clipStartSeconds,
     float clipEndSeconds,
-    bool autoDetectClipBounds
+    bool autoDetectClipBounds,
+    const juce::String& audioPath,
+    bool sketch
 )
 {
     juce::Logger::writeToLog ("=== Triggering Sound Search ===");
@@ -3523,7 +4006,18 @@ void PtV2AEditor::triggerSoundSearch (
     args.add (sessionId);
     
     // Add video if available (V2A mode)
-    if (videoPath.isNotEmpty() && juce::File(videoPath).existsAsFile())
+    if (audioPath.isNotEmpty() && juce::File (audioPath).existsAsFile())
+    {
+        args.add ("--audio");
+        args.add (audioPath);
+        if (sketch)
+        {
+            args.add ("--query");
+            args.add ("sketch");
+        }
+        juce::Logger::writeToLog (juce::String ("Sound Search: by ") + (sketch ? "sketch" : "sound") + ", query " + audioPath);
+    }
+    else if (videoPath.isNotEmpty() && juce::File(videoPath).existsAsFile())
     {
         args.add ("--video");
         args.add (videoPath);
@@ -3569,9 +4063,9 @@ void PtV2AEditor::triggerSoundSearch (
     }
     
     // If neither video nor prompt available, skip search
-    if (videoPath.isEmpty() && prompt.isEmpty())
+    if (videoPath.isEmpty() && prompt.isEmpty() && audioPath.isEmpty())
     {
-        juce::Logger::writeToLog ("INFO: No video or prompt available for sound search - skipping");
+        juce::Logger::writeToLog ("INFO: No video, sound or prompt available for sound search - skipping");
         soundRecommendations.clearResults();
         return;
     }
@@ -3698,7 +4192,16 @@ void PtV2AEditor::handleSoundSearchResult (const juce::String& output)
         sound.localPath = resultObj->getProperty ("local_path").toString();
         sound.filename = resultObj->getProperty ("filename").toString();
         sound.durationSeconds = (float) (double) resultObj->getProperty ("duration_seconds");
-        
+        const auto offsetVar = resultObj->getProperty ("offset_seconds");
+        if (offsetVar.isDouble() || offsetVar.isInt())
+        {
+            // A search by sound: the stretch of the recording that matched
+            sound.offsetSeconds = (float) (double) offsetVar;
+            sound.lengthSeconds = (float) (double) resultObj->getProperty ("length_seconds");
+            const int mins = (int) sound.offsetSeconds / 60, secs = (int) sound.offsetSeconds % 60;
+            sound.description += "  [at " + juce::String (mins) + ":" + juce::String (secs).paddedLeft ('0', 2)
+                                 + ", " + juce::String (sound.lengthSeconds, 1) + " s]";
+        }
         sounds.push_back (sound);
         
         juce::Logger::writeToLog ("Sound " + juce::String (i + 1) + ": " + sound.description + 
@@ -3782,6 +4285,19 @@ void PtV2AEditor::handleRecommendSoundsButtonClicked()
     // Then falls back to text-only if no video is available
     // This is DIFFERENT from Sound Generation which respects V2A/T2A toggle
     
+    if (recQuery != RecQuery::Video)
+    {
+        if (recQuery == RecQuery::Sketch && promptText.trim().isEmpty())
+        {
+            showStatus ("From sketch needs words: write in the prompt what the sound is.", true);
+            resetActionUi();
+            return;
+        }
+        juce::Logger::writeToLog (juce::String (recQuery == RecQuery::Sketch ? "Search by sketch" : "Search by sound")
+                                  + ": reading the audio under the selection...");
+        startSelectionAudioExport();
+        return;
+    }
     juce::Logger::writeToLog ("Starting async PTSL workflow for sound search...");
     juce::Logger::writeToLog ("Will use video if available, otherwise text-only search");
 
@@ -3856,6 +4372,7 @@ void PtV2AEditor::startHybrid (bool wholeTrack, bool resume, bool estimate)
     args.add ("utf8");
     args.add (scriptPath.getFullPathName());
     args.add (wholeTrack ? "--whole-track" : "--from-selection");
+    addVideoTrackArg (args);
     if (resume)
         args.add ("--resume");
     if (estimate)
@@ -3876,8 +4393,27 @@ void PtV2AEditor::startHybrid (bool wholeTrack, bool resume, bool estimate)
     }
     args.add ("--seed");
     args.add (juce::String (seedInput.getText().trim().isEmpty() ? -1 : seedInput.getText().trim().getIntValue()));
-    if (useMemoryLocationsToggle.getToggleState() && useMemoryLocationsToggle.isEnabled())
+    const int eventsSource = eventsSourceBox.isEnabled() ? eventsSourceBox.getSelectedId() : 1;
+    if (eventsSource >= 2)
         args.add ("--use-memory-locations");
+    if (eventsSource == 3)
+        args.add ("--no-auto-spot");
+    else
+    {
+        juce::StringArray kinds;
+        if (dialogueToggle.getToggleState()) kinds.add ("dialogue");
+        if (foleyToggle.getToggleState())    kinds.add ("foley");
+        if (sfxToggle.getToggleState())      kinds.add ("sfx");
+        if (ambienceToggle.getToggleState()) kinds.add ("ambience");
+        if (musicToggle.getToggleState())    kinds.add ("music");
+        if (kinds.size() > 0 && kinds.size() < 5)
+        {
+            args.add ("--categories");
+            args.add (kinds.joinIntoString (","));
+        }
+    }
+    if (replaceEarlierToggle.getToggleState())
+        args.add ("--replace-earlier");
     if (useDatabaseSoundsToggle.getToggleState() && useDatabaseSoundsToggle.isEnabled())
     {
         args.add ("--use-database");
@@ -3895,6 +4431,8 @@ void PtV2AEditor::startHybrid (bool wholeTrack, bool resume, bool estimate)
             }
             args.add ("--fade-seconds");
             args.add (juce::String (currentAdapter().fadeSeconds, 2));
+            if (currentAdapter().fadeInside)
+                args.add ("--fade-inside");
         }
     }
     args.add ("--scenes");      // always per scene: the session's scene memory locations, else detected
@@ -3921,7 +4459,7 @@ void PtV2AEditor::startHybrid (bool wholeTrack, bool resume, bool estimate)
     actionButton.setEnabled (false);
     hybridWholeTrackButton.setEnabled (false);
     actionButton.setButtonText (estimate ? "Counting clips..." : "Generating...");
-    progressValue = -1.0;
+    setProgressTarget (-1.0);
     progressLabel.setText (estimate ? "Reading the video track..." : wholeTrack ? "Reading the video track..."
                                                                                 : "Reading selection...",
                            juce::dontSendNotification);
@@ -3946,6 +4484,7 @@ void PtV2AEditor::startSpotting (bool wholeTrack)
     args.add ("utf8");
     args.add (scriptPath.getFullPathName());
     args.add (wholeTrack ? "--whole-track" : "--from-selection");
+    addVideoTrackArg (args);
     if (detectScenesToggle.getToggleState())
         args.add ("--scenes");
     if (! detectEventsToggle.getToggleState())
@@ -3994,11 +4533,34 @@ void PtV2AEditor::startSpotting (bool wholeTrack)
     actionButton.setEnabled (false);
     spotWholeTrackButton.setEnabled (false);
     actionButton.setButtonText ("Spotting...");
-    progressValue = -1.0;   // no measurable progress yet: busy animation
+    setProgressTarget (-1.0);   // no measurable progress yet: busy animation
     progressLabel.setText ("Reading selection...", juce::dontSendNotification);
     progressBar.setVisible (true);
     progressLabel.setVisible (true);
     startTimer (TIMER_INTERVAL_MS);
+}
+
+void PtV2AEditor::watchGenerationProgress()
+{
+    // A plain generation (no segment list): follow the file the companion mirrors the
+    // gateway's windows into; nothing is shown until the file says there are parts
+    if (! pendingSegments.isEmpty())
+        return;
+    spottingProgressFile = processor.generationProgressFile;
+    spottingProgressMtime = juce::Time();
+    lastProgressTotal = 0;
+    lastProgressCurrent = 0;
+    generationPart = 0;
+    setProgressTarget (-1.0);
+}
+
+void PtV2AEditor::endGenerationProgress()
+{
+    if (! pendingSegments.isEmpty())
+        return;
+    progressBar.setVisible (false);
+    progressLabel.setVisible (false);
+    spottingProgressFile.deleteFile();
 }
 
 void PtV2AEditor::updateSpottingProgress()
@@ -4017,6 +4579,8 @@ void PtV2AEditor::updateSpottingProgress()
 
     int current = (int) doc.getProperty ("current", 0);
     int total = (int) doc.getProperty ("total", 0);
+    lastProgressTotal = total;
+    lastProgressCurrent = current;
     juce::String clip = doc.getProperty ("clip", "").toString();
     juce::String stage = doc.getProperty ("stage", "").toString();
     juce::String detail = doc.getProperty ("detail", "").toString();
@@ -4039,16 +4603,14 @@ void PtV2AEditor::updateSpottingProgress()
     // Bar: finished clips plus the backend's share of the current one; full when the script
     // says it is done; busy animation only while a single clip's backend reports nothing.
     const bool done = (bool) doc.getProperty ("done", false);
-    progressValue = done ? 1.0
-                  : hasOverall ? juce::jlimit (0.0, 1.0, (double) overallVar)
-                  : total > 0 && (total > 1 || hasFraction || ! working)
-                        ? juce::jlimit (0.0, 1.0, (current - (working ? 1.0 : 0.0) + fraction) / total)
-                        : -1.0;
+    setProgressTarget (done ? 1.0
+                     : hasOverall ? juce::jlimit (0.0, 1.0, (double) overallVar)
+                     : total > 0 && (total > 1 || hasFraction || ! working)
+                           ? juce::jlimit (0.0, 1.0, (current - (working ? 1.0 : 0.0) + fraction) / total)
+                           : -1.0);
+    // No number in the text: the bar shows how far the run is, the words say what it does
     juce::String stageText = stage;
-    if (hasFraction)
-        stageText += (detail.isNotEmpty() ? ", " + detail : juce::String())
-                     + ", " + juce::String (juce::roundToInt (fraction * 100.0)) + "%";
-    else if (detail.isNotEmpty())
+    if (detail.isNotEmpty())
         stageText += ", " + detail;
     const juce::var etaVar = doc.getProperty ("eta_seconds", juce::var());
     if ((etaVar.isDouble() || etaVar.isInt()) && (double) etaVar > 0)

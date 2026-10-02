@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import time
 import wave
 from pathlib import Path
 from typing import Iterator, List, Optional
@@ -41,6 +42,11 @@ def add_frames(tc: str, frames: int, fps: float) -> str:
     ss = total % 60
     total //= 60
     return f"{total // 60:02d}:{total % 60:02d}:{ss:02d}:{ff:02d}"
+
+
+def is_audio_clip(clip: dict) -> bool:
+    """Older Pro Tools say CType_Audio, newer ones ClipType_Audio."""
+    return str(clip.get("clip_type", "")) in ("CType_Audio", "ClipType_Audio")
 
 
 def clip_list(engine) -> List[dict]:
@@ -85,12 +91,27 @@ def range_is_free(engine, track: str, in_tc: str, out_tc: str, fps: float = 0.0)
         inner_in, inner_out = add_frames(in_tc, 1, fps), add_frames(out_tc, -1, fps)
         if inner_out > inner_in:
             in_tc, out_tc = inner_in, inner_out
-    engine.select_tracks_by_name([track])
-    engine.set_timeline_selection(in_time=in_tc, out_time=out_tc)
-    # The filter must be the enum value; a filter given by name is ignored and the
-    # query then returns every file in the session.
-    files = [f.path for f in engine.get_file_location(filters=[pt.SelectedClipsTimeline])]
-    return not any(p.lower().endswith(AUDIO_EXTENSIONS) for p in files)
+    # Current Pro Tools list no audio files for a selection (only video), so the clips'
+    # own extent decides: selecting all clips on the track spans from the first clip's
+    # start to the last one's end. A range that touches that span counts as occupied;
+    # a gap between two clips is not looked into, the sound then goes to a new track.
+    # On a track without clips the selection is left as it was (the user's range), so
+    # an empty track is told by its own flag first.
+    try:
+        found = next((t for t in engine.track_list() if t.name == track), None)
+        attrs = getattr(found, "track_attributes", None)
+        if found is not None and attrs is not None and not getattr(attrs, "contains_clips", False):
+            return True
+    except Exception:  # noqa: BLE001  (no track list: the extent check below decides)
+        pass
+    try:
+        engine.select_all_clips_on_track(track)
+        first, last = engine.get_timeline_selection()
+    except Exception:  # noqa: BLE001  (an empty track has no clips to select)
+        return True
+    if not first or not last or first >= last:
+        return True
+    return out_tc <= first or in_tc >= last
 
 
 def rename_clip(engine, current: str, new_name: str, log) -> None:
@@ -119,8 +140,15 @@ def rename_clip(engine, current: str, new_name: str, log) -> None:
 
 
 def rename_new_track(engine, tracks_before, new_name: str, log) -> Optional[str]:
-    """After a new-track import: name the track that appeared after its clip."""
-    new_tracks = [t.name for t in engine.track_list() if t.name not in tracks_before]
+    """After a new-track import: name the track that appeared after its clip (Pro Tools
+    lists it a moment after the import answers, so this waits up to three seconds)."""
+    import time as _time
+    new_tracks: list = []
+    for _ in range(15):
+        new_tracks = [t.name for t in engine.track_list() if t.name not in tracks_before]
+        if new_tracks:
+            break
+        _time.sleep(0.2)
     if len(new_tracks) != 1 or not new_name:
         return new_tracks[0] if new_tracks else None
     taken = {t.name for t in engine.track_list()}
@@ -135,14 +163,68 @@ def rename_new_track(engine, tracks_before, new_name: str, log) -> Optional[str]
         return new_tracks[0]
 
 
+def track_channels(track) -> int:
+    """1 for a mono track, 2 for stereo, 0 when the format says something else."""
+    try:
+        name = pt.TrackFormat.Name(int(getattr(track, "format", 0)))
+    except Exception:  # noqa: BLE001
+        return 0
+    if "Mono" in name:
+        return 1
+    if "Stereo" in name:
+        return 2
+    return 0
+
+
+def file_channels(audio_path: str) -> int:
+    """Channel count of an audio file; 0 when it cannot be read."""
+    try:
+        import soundfile as sf
+        return int(sf.info(audio_path).channels)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def fit_channels(audio_path: str, channels: int, log=print) -> str:
+    """The file with `channels` channels: itself when it already has them (or `channels`
+    is 0), otherwise a mono mix or a doubled mono written next to it."""
+    if channels not in (1, 2):
+        return audio_path
+    try:
+        import numpy as np
+        import soundfile as sf
+    except ImportError:
+        return audio_path
+    try:
+        info = sf.info(audio_path)
+    except Exception as exc:  # noqa: BLE001
+        log(f"could not read {Path(audio_path).name}: {str(exc)[:120]}")
+        return audio_path
+    if info.channels == channels:
+        return audio_path
+    target = Path(audio_path).with_name(Path(audio_path).stem + (".mono.wav" if channels == 1 else ".stereo.wav"))
+    if target.exists() and target.stat().st_mtime >= Path(audio_path).stat().st_mtime:
+        return str(target)
+    data, rate = sf.read(audio_path, always_2d=True)
+    if channels == 1:
+        data = data.mean(axis=1, keepdims=True)
+    else:
+        data = np.repeat(data[:, :1], 2, axis=1) if data.shape[1] == 1 else data[:, :2]
+    sf.write(str(target), data, rate, subtype="PCM_24")
+    log(f"{Path(audio_path).name}: {info.channels} channel(s) -> {channels} for the track ({target.name})")
+    return str(target)
+
+
 def place_on_track(engine, audio_path: str, track_name: str, timecode: str,
                    clip_name: Optional[str] = None, log=print,
-                   trim_out: Optional[str] = None) -> Optional[str]:
+                   trim_out: Optional[str] = None, span_out: Optional[str] = None) -> Optional[str]:
     """Import `audio_path` into the clip list and spot it on `track_name` at `timecode`.
 
     With `trim_out` (the end of the user's selection) a sound longer than the selection is
     not placed here at all: the caller then imports it in full length onto a new track, so
     a two-minute archive recording neither spills over the next scene nor gets cut.
+    With `span_out` the caller will trim the clip to that end right after, so only the
+    range up to it has to be free on the track.
     """
     tracks = {t.name: t for t in engine.track_list()}
     if track_name not in tracks:
@@ -152,16 +234,29 @@ def place_on_track(engine, audio_path: str, track_name: str, timecode: str,
         log("this Pro Tools has no SpotClipsByID")
         return None
 
+    # A clip only spots onto a track of its own width. A recording wider than the track
+    # (stereo onto the plugin's mono track) keeps its width and goes to a new track of its
+    # own instead (the caller's fallback); a mono file on a stereo track is doubled.
+    wanted, have = track_channels(tracks[track_name]), file_channels(audio_path)
+    if wanted and have > wanted:
+        log(f"{Path(audio_path).name} has {have} channels, '{track_name}' is {'mono' if wanted == 1 else 'stereo'}: "
+            f"goes to a new track in its own width")
+        return None
+    fitted = fit_channels(audio_path, wanted, log)
+    if fitted != audio_path:
+        audio_path = fitted
+
     fps = get_session_framerate(engine)
     duration = audio_duration_seconds(audio_path)
     out_tc = add_frames(timecode, max(1, int(round(duration * fps))), fps)
     if trim_out and trim_out > timecode and trim_out < out_tc:
         log(f"{duration:.1f} s is longer than the selection {timecode}-{trim_out}: goes to a new track in full length")
         return None
+    needed_out = min(out_tc, span_out) if span_out and span_out > timecode else out_tc
 
     with linked_selection(engine, log):
-        if not range_is_free(engine, track_name, timecode, out_tc, fps):
-            log(f"{timecode}-{out_tc} on '{track_name}' is occupied")
+        if not range_is_free(engine, track_name, timecode, needed_out, fps):
+            log(f"{timecode}-{needed_out} on '{track_name}' is occupied")
             return None
 
         before = {c["clip_id"] for c in clip_list(engine)}
@@ -169,7 +264,14 @@ def place_on_track(engine, audio_path: str, track_name: str, timecode: str,
                                  audio_data=pt.AudioData(file_list=[str(Path(audio_path))],
                                                          audio_destination=pt.MD_ClipList,
                                                          audio_location=pt.ML_None)))
-        new = [c for c in clip_list(engine) if c["clip_id"] not in before and c.get("clip_type") == "CType_Audio"]
+        # The clip list lags behind the import by a moment: without the wait the diff was
+        # empty and a sound that belonged on this track went to a new one
+        new = []
+        for _ in range(15):
+            new = [c for c in clip_list(engine) if c["clip_id"] not in before and is_audio_clip(c)]
+            if new:
+                break
+            time.sleep(0.2)
         if not new:
             log("import to clip list produced no new clip")
             return None
