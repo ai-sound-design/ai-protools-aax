@@ -90,13 +90,61 @@ juce::AudioProcessorEditor* PtV2AProcessor::createEditor()
 
 void PtV2AProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // minimal: store nothing yet
-    juce::MemoryOutputStream (destData, true).writeString ("{}");
+    // The session keeps the editor window size; everything else lives in config.json
+    auto* root = new juce::DynamicObject();
+    if (editorWidth > 0 && editorHeight > 0)
+    {
+        root->setProperty ("editor_width", editorWidth);
+        root->setProperty ("editor_height", editorHeight);
+    }
+    juce::MemoryOutputStream (destData, true).writeString (juce::JSON::toString (juce::var (root), true));
 }
 
 void PtV2AProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    juce::ignoreUnused (data, sizeInBytes);
+    auto json = juce::JSON::parse (juce::String::fromUTF8 (static_cast<const char*> (data), sizeInBytes));
+    if (auto* root = json.getDynamicObject())
+    {
+        const int w = (int) root->getProperty ("editor_width"), h = (int) root->getProperty ("editor_height");
+        if (w > 0 && h > 0)
+        {
+            editorWidth = w;
+            editorHeight = h;
+        }
+    }
+}
+
+juce::File PtV2AProcessor::getUiFilePath()
+{
+    return getUserDataDir().getChildFile ("ui.json");
+}
+
+void PtV2AProcessor::rememberEditorSize (int width, int height)
+{
+    if (width <= 0 || height <= 0 || (width == editorWidth && height == editorHeight))
+        return;
+    editorWidth = width;
+    editorHeight = height;
+    auto* root = new juce::DynamicObject();
+    root->setProperty ("editor_width", width);
+    root->setProperty ("editor_height", height);
+    getUiFilePath().replaceWithText (juce::JSON::toString (juce::var (root), true));
+}
+
+void PtV2AProcessor::loadRememberedEditorSize()
+{
+    if (editorWidth > 0 && editorHeight > 0)
+        return;
+    auto json = juce::JSON::parse (getUiFilePath().loadFileAsString());
+    if (auto* root = json.getDynamicObject())
+    {
+        const int w = (int) root->getProperty ("editor_width"), h = (int) root->getProperty ("editor_height");
+        if (w > 0 && h > 0)
+        {
+            editorWidth = w;
+            editorHeight = h;
+        }
+    }
 }
 
 //==============================================================================
@@ -386,9 +434,19 @@ std::vector<PtV2AProcessor::AdapterProfile> PtV2AProcessor::getAdapterProfiles()
                 p.minDuration = 4.0; p.maxDuration = 12.0; p.defaultDuration = 8.0;
             }
         }
+        {
+            // What the backend itself said in its health answer outranks the profile
+            const juce::ScopedLock lock (reportedDurationLock);
+            if (auto reported = reportedDurationLimits.find (p.file); reported != reportedDurationLimits.end())
+            {
+                p.minDuration = reported->second.first;
+                p.maxDuration = reported->second.second;
+                p.defaultDuration = juce::jlimit (p.minDuration, p.maxDuration, p.defaultDuration);
+            }
+        }
         if (auto* match = obj->getProperty ("match").getDynamicObject())
         {
-            p.piecesPer10s = juce::jlimit (1, 20, (int) match->getProperty ("pieces_per_10s"));
+            p.piecesPer10s = juce::jlimit (0, 20, (int) match->getProperty ("pieces_per_10s"));   // 0: automatic
             p.layers = juce::jlimit (1, 10, (int) match->getProperty ("layers"));
             if (match->hasProperty ("min_similarity"))
                 p.minSimilarity = juce::jlimit (0.0, 1.0, (double) match->getProperty ("min_similarity"));
@@ -400,6 +458,7 @@ std::vector<PtV2AProcessor::AdapterProfile> PtV2AProcessor::getAdapterProfiles()
                 p.fadePreset = match->getProperty ("fade_preset").toString().trim();
             if (match->hasProperty ("fade_seconds"))
                 p.fadeSeconds = juce::jlimit (0.0, 30.0, (double) match->getProperty ("fade_seconds"));
+            p.fadeInside = (bool) match->getProperty ("fade_inside");
         }
         if (p.name.isEmpty() || ! (p.kind == "generation" || p.kind == "search" || p.kind == "spotting" || p.kind == "hybrid"))
             continue;
@@ -455,24 +514,39 @@ bool PtV2AProcessor::saveAdapterUrl (const juce::String& file, const juce::Strin
     return target.replaceWithText (juce::JSON::toString (json, false));
 }
 
-bool PtV2AProcessor::saveAdapterDuration (const juce::String& file, double minSeconds, double maxSeconds, double defaultSeconds)
+void PtV2AProcessor::setReportedDurationLimits (const juce::String& file, double minSeconds, double maxSeconds)
 {
-    auto target = getAdapterDir().getChildFile (file);
-    auto json = juce::JSON::parse (target.loadFileAsString());
-    auto* obj = json.getDynamicObject();
-    if (obj == nullptr)
+    if (file.isEmpty() || minSeconds <= 0.0 || maxSeconds < minSeconds)
+        return;
+    const juce::ScopedLock lock (reportedDurationLock);
+    auto& slot = reportedDurationLimits[file];
+    if (slot.first != minSeconds || slot.second != maxSeconds)
+        juce::Logger::writeToLog ("Backend " + file + " reports lengths " + juce::String (minSeconds, 0) + "-"
+                                  + juce::String (maxSeconds, 0) + " s");
+    slot = { minSeconds, maxSeconds };
+}
+
+bool PtV2AProcessor::parseDurationLimits (const juce::String& healthBody, double& minSeconds, double& maxSeconds)
+{
+    auto json = juce::JSON::parse (healthBody);
+    if (! json.isObject())
         return false;
-    auto* block = new juce::DynamicObject();
-    block->setProperty ("min", minSeconds);
-    block->setProperty ("max", maxSeconds);
-    block->setProperty ("default", defaultSeconds);
-    obj->setProperty ("duration", juce::var (block));
-    return target.replaceWithText (juce::JSON::toString (json, false));
+    auto read = [] (const juce::var& object, double& lo, double& hi)
+    {
+        if (! object.isObject() || ! object.hasProperty ("max_seconds"))
+            return false;
+        lo = object.hasProperty ("min_seconds") ? (double) object.getProperty ("min_seconds", 0.0) : 0.0;
+        hi = (double) object.getProperty ("max_seconds", 0.0);
+        if (lo <= 0.0)
+            lo = 1.0;
+        return hi >= lo;
+    };
+    return read (json, minSeconds, maxSeconds) || read (json.getProperty ("capabilities", juce::var()), minSeconds, maxSeconds);
 }
 
 bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10s, int layers, double minSimilarity,
                                        double ambienceHandleSeconds, int tracksPerScene, const juce::String& fadePreset,
-                                       double fadeSeconds)
+                                       double fadeSeconds, bool fadeInside)
 {
     auto target = getAdapterDir().getChildFile (file);
     auto json = juce::JSON::parse (target.loadFileAsString());
@@ -492,6 +566,7 @@ bool PtV2AProcessor::saveAdapterMatch (const juce::String& file, int piecesPer10
     block->setProperty ("tracks_per_scene", tracksPerScene);
     block->setProperty ("fade_preset", fadePreset);
     block->setProperty ("fade_seconds", fadeSeconds);
+    block->setProperty ("fade_inside", fadeInside);
     return target.replaceWithText (juce::JSON::toString (json, false));
 }
 
@@ -614,6 +689,10 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     
     juce::Logger::writeToLog ("Script directory: " + scriptPath);
     
+    generationProgressFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                 .getChildFile ("ai_sound_design_generation_" + juce::String (juce::Time::currentTimeMillis()) + ".json");
+    generationProgressFile.deleteFile();
+
     // Build command line arguments using StringArray for clean direct execution
     juce::StringArray commandArray;
     
@@ -639,6 +718,8 @@ juce::String PtV2AProcessor::generateAudioFromVideo (
     
     commandArray.add ("--seed");
     commandArray.add (juce::String (seed));
+    commandArray.add ("--progress-file");
+    commandArray.add (generationProgressFile.getFullPathName());
     
     // The profile tells the script where the backend is and how to build the request
     commandArray.add ("--adapter");
@@ -796,6 +877,10 @@ juce::String PtV2AProcessor::generateAudioTextOnly (
     juce::File scriptDir = scriptFile.getParentDirectory();
     juce::Logger::writeToLog ("Script directory: " + scriptDir.getFullPathName());
     
+    generationProgressFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                 .getChildFile ("ai_sound_design_generation_" + juce::String (juce::Time::currentTimeMillis()) + ".json");
+    generationProgressFile.deleteFile();
+
     // Build command line arguments (NO --video parameter for T2A)
     juce::StringArray commandArray;
     
@@ -826,6 +911,8 @@ juce::String PtV2AProcessor::generateAudioTextOnly (
     
     commandArray.add ("--seed");
     commandArray.add (juce::String (seed));
+    commandArray.add ("--progress-file");
+    commandArray.add (generationProgressFile.getFullPathName());
     
     // The selected adapter profile tells the script where the backend is
     const auto adapter = getSelectedAdapter ("generation");
@@ -1685,8 +1772,27 @@ PtV2AProcessor::BackendSettings PtV2AProcessor::getBackendSettings()
     if (auto* adapters = root->getProperty ("adapters").getDynamicObject())
         for (const auto& entry : adapters->getProperties())
             settings.adapters[entry.name.toString()] = entry.value.toString();
-    settings.clientId = root->getProperty ("cf_access_client_id").toString();
-    settings.clientSecret = root->getProperty ("cf_access_client_secret").toString();
+    settings.tunnelHeaderNames.clear();
+    settings.tunnelHeaderValues.clear();
+    if (auto* headers = root->getProperty ("tunnel_headers").getDynamicObject())
+    {
+        for (const auto& entry : headers->getProperties())
+        {
+            settings.tunnelHeaderNames.add (entry.name.toString());
+            settings.tunnelHeaderValues.add (entry.value.toString());
+        }
+    }
+    else
+    {
+        // Older config: the Cloudflare Access pair under its own keys
+        const auto id = root->getProperty ("cf_access_client_id").toString();
+        const auto secret = root->getProperty ("cf_access_client_secret").toString();
+        if (id.isNotEmpty() || secret.isNotEmpty())
+        {
+            settings.tunnelHeaderNames.addArray ({ "CF-Access-Client-Id", "CF-Access-Client-Secret" });
+            settings.tunnelHeaderValues.addArray ({ id, secret });
+        }
+    }
 
     if (auto* services = root->getProperty ("services").getDynamicObject())
     {
@@ -1726,8 +1832,13 @@ bool PtV2AProcessor::saveBackendSettings (const BackendSettings& settings)
             adaptersVar.getDynamicObject()->setProperty (kv.first, kv.second);
         root->setProperty ("adapters", adaptersVar);
     }
-    root->setProperty ("cf_access_client_id", settings.clientId);
-    root->setProperty ("cf_access_client_secret", settings.clientSecret);
+    juce::var headersVar (new juce::DynamicObject());
+    for (int i = 0; i < juce::jmin (settings.tunnelHeaderNames.size(), settings.tunnelHeaderValues.size()); ++i)
+        if (settings.tunnelHeaderNames[i].trim().isNotEmpty())
+            headersVar.getDynamicObject()->setProperty (settings.tunnelHeaderNames[i].trim(), settings.tunnelHeaderValues[i].trim());
+    root->setProperty ("tunnel_headers", headersVar);
+    root->removeProperty ("cf_access_client_id");          // moved into tunnel_headers
+    root->removeProperty ("cf_access_client_secret");
 
     juce::var servicesVar = root->getProperty ("services");
     if (servicesVar.getDynamicObject() == nullptr)

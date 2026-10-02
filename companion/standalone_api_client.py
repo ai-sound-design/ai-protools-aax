@@ -120,6 +120,10 @@ Examples:
     
     # Video input (required for CLI mode)
     parser.add_argument(
+        '--progress-file',
+        help="Generation: JSON file rewritten with the backend's progress (stage, current/total parts, fraction, overall) for the plugin's bar"
+    )
+    parser.add_argument(
         '--video', '-v',
         type=str,
         help='Path to input video file (MP4, MOV, AVI, etc.)'
@@ -251,7 +255,7 @@ Examples:
     parser.add_argument(
         '--action',
         type=str,
-        choices=['generate', 't2a', 'check_ffmpeg', 'get_video_selection', 'get_video_file', 'get_video_info', 'trim_video', 'validate_duration', 'get_duration', 'import_audio', 'clip_detect_and_trim', 'get_clip_bounds', 'resolve_video_segments', 'test_cloudflare', 'list_adapters', 'ensure_adapters'],
+        choices=['generate', 't2a', 'check_ffmpeg', 'get_video_selection', 'get_video_file', 'get_video_info', 'trim_video', 'validate_duration', 'get_duration', 'import_audio', 'clip_detect_and_trim', 'get_clip_bounds', 'resolve_video_segments', 'list_video_tracks', 'export_selection_audio', 'test_cloudflare', 'list_adapters', 'ensure_adapters'],
         default='generate',
         help='Action to perform (default: generate)'
     )
@@ -261,6 +265,11 @@ Examples:
         '--whole-track',
         action='store_true',
         help='resolve_video_segments: use the whole video track instead of the timeline selection'
+    )
+    parser.add_argument(
+        '--video-track',
+        default=None,
+        help='resolve_video_segments: the video track to map onto (default: the topmost, or the one the selection lies on)'
     )
     parser.add_argument(
         '--cf-client-id',
@@ -306,6 +315,32 @@ type=str,
     parser.add_argument(
         '--timecode-out',
         help='End of the selection (import_audio action): a longer clip is trimmed to it'
+    )
+    parser.add_argument(
+        '--cut',
+        action='store_true',
+        help='import_audio: trim the clip to the selection (--timecode..--timecode-out); the rest of the file stays as handles'
+    )
+    parser.add_argument(
+        '--handle-before',
+        type=float,
+        default=0.0,
+        help='import_audio with --cut: this many seconds of the file lie before the selection (imported that much earlier)'
+    )
+    parser.add_argument(
+        '--fade-preset',
+        help='import_audio with --cut: Pro Tools batch-fades preset for the clip\'s edges'
+    )
+    parser.add_argument(
+        '--fade-seconds',
+        type=float,
+        default=1.0,
+        help='import_audio with --cut: the preset\'s fade length'
+    )
+    parser.add_argument(
+        '--fade-inside',
+        action='store_true',
+        help='import_audio with --cut: the fade runs inside the selection (the clip ends at it) instead of over the handle'
     )
     parser.add_argument(
         '--timecode',
@@ -388,6 +423,36 @@ def get_user_inputs_interactive():
     
     return prompt, negative_prompt, seed
 
+
+
+def _generation_progress_writer(path):
+    """A callback for generate_with_profile that mirrors the backend's progress into the
+    plugin's progress file (same keys the spotting and hybrid runs use). The generation
+    gateway reports stage, part, parts, fraction and detail; a plain model service reports
+    nothing, so the file is written only when parts are known."""
+    if not path:
+        return None
+    import time as _time
+    target = Path(path)
+
+    def write(doc):
+        parts = int(doc.get("parts") or 0)
+        if parts <= 0:
+            return
+        part = int(doc.get("part") or 0)
+        fraction = doc.get("fraction")
+        stage = str(doc.get("stage") or "generating")
+        body = {"current": part, "total": parts, "clip": "", "stage": "generating" if stage == "generating" else stage,
+                "done": stage == "done", "fraction": fraction, "overall": fraction,
+                "detail": f"part {max(1, part)} of {parts}" if stage == "generating" else str(doc.get("detail") or ""),
+                "eta_seconds": None, "alive": _time.time()}
+        try:
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(json.dumps(body), encoding="utf-8")
+            tmp.replace(target)
+        except OSError:
+            pass
+    return write
 
 def main():
     """Main entry point for the standalone API client"""
@@ -523,9 +588,36 @@ def main():
 
             log_debug(f"=== DEBUG: resolve_video_segments START (whole_track={args.whole_track}) ===")
             with open_engine(company_name="AI Sound Design", application_name="Video segments") as engine:
-                return resolve_video_segments(engine, whole_track=args.whole_track, log=log_debug)
+                return resolve_video_segments(engine, whole_track=args.whole_track,
+                                              track_name=args.video_track or None, log=log_debug)
 
         return safe_action_wrapper(resolve_video_segments_logic)
+
+    elif args.action == 'export_selection_audio':
+        """The audio under the selection on the selected tracks as one WAV (--output): the
+        query for a search by sound"""
+        def export_selection_audio_logic():
+            import tempfile as _tempfile
+            from ptsl import open_engine
+            from ptsl_integration.audio_segments import export_selection_audio
+
+            target = Path(args.output) if args.output else \
+                Path(_tempfile.gettempdir()) / "ai_sound_design_selection_audio.wav"
+            with open_engine(company_name="AI Sound Design", application_name="Selection audio") as engine:
+                return export_selection_audio(engine, target, log=log_debug)
+
+        return safe_action_wrapper(export_selection_audio_logic)
+
+    elif args.action == 'list_video_tracks':
+        """The session's video tracks, top to bottom (for the plugin's Video track list)"""
+        def list_video_tracks_logic():
+            from ptsl import open_engine
+            from ptsl_integration.video_segments import _is_video_track
+
+            with open_engine(company_name="AI Sound Design", application_name="Video tracks") as engine:
+                return {"success": True, "tracks": [t.name for t in engine.track_list() if _is_video_track(t)]}
+
+        return safe_action_wrapper(list_video_tracks_logic)
 
     elif args.action == 'get_video_info':
         """Get timeline selection AND video file in one PTSL call (faster!)"""
@@ -617,6 +709,11 @@ def main():
                 track_name=getattr(args, 'track_name', None) or None,
                 clip_name=getattr(args, 'clip_name', None) or None,
                 timecode_out=getattr(args, 'timecode_out', None) or None,
+                cut=bool(getattr(args, 'cut', False)),
+                handle_before=float(getattr(args, 'handle_before', 0.0) or 0.0),
+                fade_preset=getattr(args, 'fade_preset', None) or None,
+                fade_seconds=float(getattr(args, 'fade_seconds', 1.0) or 0.0),
+                fade_inside=bool(getattr(args, 'fade_inside', False)),
             )
         
         return safe_action_wrapper(import_audio_logic)
@@ -1316,6 +1413,7 @@ def main():
             output_format=args.output_format,
             timeout=args.timeout,
             log=lambda m: print(m, file=sys.stderr),
+            on_progress=_generation_progress_writer(args.progress_file),
         )
         
         if output_file:

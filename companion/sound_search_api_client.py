@@ -101,6 +101,8 @@ def action_search(args):
     log_debug(f"Timeline: {args.timeline_start}s - {args.timeline_end}s, Video offset: {args.video_offset}")
     log_debug(f"Clip bounds: {args.clip_start_seconds}s - {args.clip_end_seconds}s")
     
+    if getattr(args, "audio", None):
+        return action_search_by_sound(args)
     if not args.video and not args.text:
         log_debug("ERROR: Must provide either --video or --text")
         return {
@@ -324,16 +326,78 @@ def action_search(args):
     }
 
 
+def action_search_by_sound(args):
+    """Search with the audio file in --audio (the selection's sound) and the optional
+    text; the answer carries where in each recording the match lies."""
+    from api.sound_search_client import search_by_sound, search_sounds
+    sketch = getattr(args, "query", "sound") == "sketch"
+    only = None
+    if sketch:
+        # A sketch (voice or taps) says only how the sound runs; the words say what it is.
+        # The candidates come from the description search (precise on names), then the
+        # loudness shape picks the stretch inside each of them; the sketch's timbre is never used
+        if not (args.text or "").strip():
+            return {"status": "error", "message": "From sketch needs words: what is the sound?"}
+        named = search_sounds(text_query=args.text, limit=max(args.limit * 2, 8), text_weight=1.0, quiet=True)
+        if not named:
+            return {"status": "error", "message": f"No archive sound is described like '{args.text}'."}
+        only = [int(r["id"]) for r in named]
+        weight, envelope = 1.0, 0.9
+    else:
+        weight, envelope = 0.0, None
+        if args.text:
+            weight = args.text_weight if 0.0 < args.text_weight < 1.0 else 0.5   # both given: share the query
+    results = search_by_sound(args.audio, text_query=args.text, limit=args.limit, text_weight=weight,
+                              quiet=args.quiet, envelope_weight=envelope, only=only)
+    if results is None:
+        return {"status": "error",
+                "message": "Search by sound failed: is the search backend running and its audio index built?"}
+    output = {"status": "success", "count": len(results), "session_id": args.session_id,
+              "query": "sketch" if sketch else "sound",
+              "results": [{"id": r["id"], "description": r.get("description", ""), "category": r.get("category", ""),
+                           "similarity": r.get("similarity", 0.0), "duration_seconds": r.get("duration_seconds", 0),
+                           "offset_seconds": r.get("offset_seconds"), "length_seconds": r.get("length_seconds"),
+                           "file_path": r.get("file_path", "")} for r in results]}
+    return _write_search_output(args, output)
+
+
+def _write_search_output(args, output):
+    """The search answer to --output-json (or the session's temp file) and a short status."""
+    if args.output_json:
+        output_file = args.output_json
+    else:
+        import tempfile
+        output_file = os.path.join(tempfile.gettempdir(),
+                                   f"sound_search_{args.session_id}.json" if args.session_id else "sound_search_results.json")
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(json.dumps(output, indent=2))
+    return {"status": "success", "count": output["count"], "output_file": output_file}
+
+
 def action_download(args):
-    """Download a specific sound by ID"""
+    """Download a specific sound by ID (or, with --offset-seconds and --length-seconds,
+    only that stretch of it as a WAV snippet)"""
     log_debug(f"Action: download - sound_id={args.sound_id}")
-    
+
     if not args.sound_id:
         log_debug("ERROR: Must provide --sound-id")
         return {
             "status": "error",
             "message": "Must provide --sound-id"
         }
+    if args.offset_seconds is not None and args.length_seconds:
+        from api.sound_search_client import download_snippet
+        local_path = download_snippet(args.sound_id, args.offset_seconds, args.length_seconds,
+                                      output_dir=args.output, session_id=args.session_id, quiet=args.quiet)
+        if not local_path:
+            return {"status": "error", "message": f"Failed to download the snippet of sound {args.sound_id}"}
+        output = {"status": "success", "sound_id": args.sound_id, "local_path": local_path,
+                  "filename": Path(local_path).name}
+        if args.output_json:
+            with open(args.output_json, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(output, indent=2))
+            return {"status": "success", "output_file": args.output_json}
+        return output
     
     local_path = download_sound(
         sound_id=args.sound_id,
@@ -418,6 +482,30 @@ def main():
     )
     
     # Search parameters
+    parser.add_argument(
+        '--audio',
+        type=str,
+        help="Search by sound: a WAV/MP3 whose sound the results should resemble (the selection's audio)"
+    )
+    parser.add_argument(
+        '--query',
+        choices=['sound', 'sketch'],
+        default='sound',
+        help='With --audio: "sound" searches by what the audio sounds like (plus the text); "sketch" searches by '
+             'the text alone and picks the stretch of each recording whose loudness runs like the audio'
+    )
+    parser.add_argument(
+        '--offset-seconds',
+        type=float,
+        default=None,
+        help='Download: start of the stretch to fetch (with --length-seconds, as a WAV snippet)'
+    )
+    parser.add_argument(
+        '--length-seconds',
+        type=float,
+        default=None,
+        help='Download: length of the stretch to fetch'
+    )
     parser.add_argument(
         '--video',
         type=str,

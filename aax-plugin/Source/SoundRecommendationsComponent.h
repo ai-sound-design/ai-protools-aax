@@ -16,6 +16,8 @@ struct SoundResult
     juce::String category;
     float similarity = 0.0f;
     float durationSeconds = 0.0f;
+    float offsetSeconds = -1.0f;   ///< a search by sound: where in the recording the match lies (-1: whole file)
+    float lengthSeconds = 0.0f;    ///< ...and how long that stretch is (the query's length)
     juce::String localPath;///< set once the file has been downloaded
     juce::String filename;
 };

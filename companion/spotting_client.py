@@ -421,7 +421,7 @@ def run_segments(segments: List[Dict], fps: float, args, progress: Progress,
                                   on_progress=lambda p: progress.update(0, total, "", "detecting scenes",
                                                                         fraction=p.get("fraction"),
                                                                         detail=p.get("detail", ""),
-                                                                        overall=share.scenes(p.get("fraction"))))
+                                                                        overall=share.scenes(max(0.05, p.get("fraction")))))
             scenes = found.get("scenes", [])
             scene_marks = scene_markers(scenes, segments)
             log(f"{len(scenes)} scene(s): " + "; ".join(f"{s.get('index')}: {s.get('name')}" for s in scenes))
@@ -515,6 +515,8 @@ def main() -> int:
     parser.add_argument("--clip-start", type=float, help="--video: cut the video from this second (source time) ...")
     parser.add_argument("--clip-end", type=float, help="... to this second before spotting")
     parser.add_argument("--hints", help="free-text context for the model")
+    parser.add_argument("--video-track", default=None,
+                        help="the video track to map the range onto (default: the topmost, or the one the selection lies on)")
     parser.add_argument("--scenes", action="store_true",
                         help="group the clips of the range into scenes first and place one memory location per scene")
     parser.add_argument("--no-events", action="store_true",
@@ -546,7 +548,8 @@ def main() -> int:
 
             progress.update(0, 0, "", "reading selection")
             with engine_factory() as engine:
-                resolved = resolve_video_segments(engine, whole_track=args.whole_track, log=log)
+                resolved = resolve_video_segments(engine, whole_track=args.whole_track,
+                                                  track_name=getattr(args, "video_track", None) or None, log=log)
             if not resolved.get("success"):
                 raise RuntimeError(resolved.get("error", "could not resolve the video range"))
             for warning in resolved.get("warnings", []):
