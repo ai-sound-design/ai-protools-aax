@@ -258,12 +258,12 @@ Make executable: `chmod +x install_mac.sh`
 cd build/pt_v2a_artefacts/AAX
 
 # Create DMG
-hdiutil create -volname "AI Sound Design plugin v0.1.0" \
+hdiutil create -volname "AI Sound Design plugin v0.1.1" \
     -srcfolder AI Sound Design.aaxplugin \
     -ov -format UDZO \
-    AI-Sound-Design_v0.1.0_macOS.dmg
+    AI-Sound-Design_v0.1.1_macOS.dmg
 
-# Output: AI-Sound-Design_v0.1.0_macOS.dmg (ready for distribution)
+# Output: AI-Sound-Design_v0.1.1_macOS.dmg (ready for distribution)
 ```
 
 Users drag `AI Sound Design.aaxplugin` from DMG to `/Library/Application Support/Avid/Audio/Plug-Ins/`

@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.21)
 
 # Project metadata - version is used throughout the build
 project(pt_v2a 
-    VERSION 0.1.0 
+    VERSION 0.1.1 
     LANGUAGES CXX
     DESCRIPTION "Pro Tools Video-to-Audio Plugin with AI Generation"
 )

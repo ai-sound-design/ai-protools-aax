@@ -2,7 +2,7 @@
 ;
 ; Build it with build_installer_windows.ps1, which passes the signed bundle and the
 ; version, or by hand:
-;   ISCC.exe /DBundleDir="C:\path\to\AI Sound Design.aaxplugin" /DAppVer=0.1.0 installer_windows.iss
+;   ISCC.exe /DBundleDir="C:\path\to\AI Sound Design.aaxplugin" /DAppVer=0.1.1 installer_windows.iss
 ; Inno Setup 6: https://jrsoftware.org/isdl.php (winget install JRSoftware.InnoSetup)
 ;
 ; The resulting setup .exe carries the whole bundle (the DLL and the embedded Python)
@@ -14,7 +14,7 @@
   #define BundleDir "..\..\build-aax-vs\pt_v2a_artefacts\Release\AAX\AI Sound Design.aaxplugin"
 #endif
 #ifndef AppVer
-  #define AppVer "0.1.0"
+  #define AppVer "0.1.1"
 #endif
 #define PluginFolder "AI Sound Design.aaxplugin"
 
