@@ -13,7 +13,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 if [ "$ARCH" == "intel" ]; then
     INSTALLER_NAME="AI-Sound-Design-macOS-Intel-v${VERSION}"
     ARCH_DISPLAY="Intel (x86_64)"

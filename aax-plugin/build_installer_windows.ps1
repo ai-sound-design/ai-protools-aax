@@ -49,7 +49,7 @@ if (-not $signed) {
 
 # The version, from the CMake project
 $cmake = Get-Content (Join-Path $here "CMakeLists.txt") -Raw
-$version = "0.1.0"
+$version = "0.1.1"
 if ($cmake -match "(?m)^\s*VERSION\s+(\d+\.\d+\.\d+)") { $version = $Matches[1] }
 
 # Inno Setup's command-line compiler
