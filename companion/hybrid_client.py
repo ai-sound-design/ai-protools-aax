@@ -78,6 +78,9 @@ from ptsl_integration.clip_finish import finish_clip, seconds_to_tc   # noqa: E4
 SCENE_MARK = re.compile(r"^Scene \d+\s*:")
 
 
+MARKER_NOTE = re.compile(r"\s*\((?:confidence [0-9.]+|hybrid run|reference)\)\s*$")
+
+
 def memory_locations_in(engine, seg: Dict, sample_rate: int) -> List[dict]:
     """The session's memory locations inside one segment, as events relative to its start."""
     events = []
@@ -93,10 +96,15 @@ def memory_locations_in(engine, seg: Dict, sample_rate: int) -> List[dict]:
             continue   # a scene marker ("Scene 2: Kitchen"), not a sound event
         comment = str(getattr(m, "comments", "") or "")
         category = comment.split(":", 1)[0].strip().lower() if ":" in comment else ""
+        known = category in ("dialogue", "foley", "sfx", "ambience", "music")
+        # The sound is what the comment says after "category:", without the notes the
+        # plugin's own markers carry ("(confidence 0.80)", "(hybrid run)"): those words
+        # would otherwise go into the generation prompt and the library search.
+        text = MARKER_NOTE.sub("", comment.split(":", 1)[1] if known else comment).strip()
         events.append({
             "label": m.name,
-            "description": comment or m.name,
-            "category": category if category in ("dialogue", "foley", "sfx", "ambience", "music") else "sfx",
+            "description": text or m.name,
+            "category": category if known else "sfx",
             "start_seconds": round(start - seg["in_seconds"], 3),
             "end_seconds": round(min(max(end, start), seg["out_seconds"]) - seg["in_seconds"], 3),
         })

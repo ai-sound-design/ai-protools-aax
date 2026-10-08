@@ -2432,6 +2432,19 @@ void PtV2AEditor::startAudioImport (const juce::String& audioPath)
     {
         commandArray.add ("--timecode");
         commandArray.add (importTimecode);
+        if (generationCutOut.isNotEmpty() && ! isT2AMode)
+        {
+            // Made longer than the range (the model's minimum): cut back to it, the sound
+            // before and after it kept in the file as handles
+            commandArray.add ("--timecode-out");
+            commandArray.add (generationCutOut);
+            commandArray.add ("--cut");
+            if (generationLeadSeconds > 0.0f)
+            {
+                commandArray.add ("--handle-before");
+                commandArray.add (juce::String (generationLeadSeconds, 3));
+            }
+        }
     }
     else
     {
@@ -2742,19 +2755,43 @@ void PtV2AEditor::startNextSegmentGeneration()
         juce::String name = seg.getProperty ("clip_name", "").toString();
         float duration = (float) (double) seg.getProperty ("duration_seconds", 0.0);
 
-        if (const auto limits = currentAdapter(); limits.isValid() && ! limits.acceptsDuration (duration))
-        {
-            skippedSegments.add (name + " (" + juce::String (duration, 1) + " s, " + limits.name + " takes " + limits.durationRange() + ")");
-            juce::Logger::writeToLog ("Skipping " + name + ": " + juce::String (duration, 2) + "s");
-            continue;
-        }
-
         currentVideoPath   = seg.getProperty ("video_path", "").toString();
         timelineInTime     = seg.getProperty ("in_time", "").toString();
         timelineInSeconds  = (float) (double) seg.getProperty ("in_seconds", 0.0);
         timelineOutSeconds = (float) (double) seg.getProperty ("out_seconds", 0.0);
         clipStartSeconds   = (float) (double) seg.getProperty ("source_start_seconds", -1.0);
         clipEndSeconds     = (float) (double) seg.getProperty ("source_end_seconds", -1.0);
+        generationLeadSeconds = 0.0f;
+        generationCutOut.clear();
+
+        if (const auto limits = currentAdapter(); limits.isValid() && ! limits.acceptsDuration (duration))
+        {
+            // Shorter than the model makes: as in Hybrid, the sound is made at the minimum
+            // length from the video around the range (half before, half after, as far as the
+            // clip's file reaches before it) and cut back to the range, the rest kept as handles
+            const juce::String outTime = seg.getProperty ("out_time", "").toString();
+            if (duration < limits.minDuration && clipStartSeconds >= 0.0f && clipEndSeconds > clipStartSeconds
+                && outTime.isNotEmpty())
+            {
+                const float need = (float) limits.minDuration - duration + 0.05f;
+                const float lead = juce::jmin (clipStartSeconds, need * 0.5f);
+                generationLeadSeconds = lead;
+                generationCutOut = outTime;
+                clipStartSeconds -= lead;
+                clipEndSeconds += need - lead;
+                timelineInSeconds -= lead;
+                timelineOutSeconds += need - lead;
+                juce::Logger::writeToLog ("Range of " + juce::String (duration, 2) + " s shorter than " + limits.name
+                                          + "'s minimum: made from " + juce::String (clipEndSeconds - clipStartSeconds, 2)
+                                          + " s of video (" + juce::String (lead, 2) + " s before it), cut back to the range");
+            }
+            else
+            {
+                skippedSegments.add (name + " (" + juce::String (duration, 1) + " s, " + limits.name + " takes " + limits.durationRange() + ")");
+                juce::Logger::writeToLog ("Skipping " + name + ": " + juce::String (duration, 2) + "s");
+                continue;
+            }
+        }
 
         juce::Logger::writeToLog ("Segment " + juce::String (currentSegmentIndex + 1) + "/" + juce::String (pendingSegments.size())
                                   + ": " + name + " at " + timelineInTime + ", source "

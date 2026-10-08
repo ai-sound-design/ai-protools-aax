@@ -346,6 +346,8 @@ private:
     juce::ToggleButton recFadeToggle { "Auto fade" };
     AdapterProfile clipSettings() const;        ///< the selected hybrid profile, or the defaults
     float pendingHandleBefore = 0.0f;           ///< seconds of the downloaded stretch that lie before the selection
+    float generationLeadSeconds = 0.0f;         ///< a short range made at the model's minimum: video taken this much before it
+    juce::String generationCutOut;              ///< ... and the sound cut back to the selection, which ends here
     juce::String currentAudioQueryPath;         ///< the selection's audio, written by the companion
     juce::Label durationLabel { {}, "Duration:" };
     juce::ComboBox durationComboBox;       
