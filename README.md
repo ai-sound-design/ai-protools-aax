@@ -13,34 +13,72 @@ The exact state of this repository at the time of paper submission is preserved 
 The `main` branch continues to be developed. In particular, the design implications derived from the paper will be implemented here, so `main` may differ from the version described in the paper.
 GitHub's auto-generated source archives do not include the Git submodules in `external/`; use `git clone --recurse-submodules` instead.
 
-## Demo
+## Modes
 
-### 1. Sound Generation
-https://github.com/user-attachments/assets/cbe2bbf0-ac58-4ff3-87b1-0d0e45d20e33
+Mark a time range on any track in Pro Tools; the plugin finds the video clips beneath it and works on each clip. The videos show the four modes on two short clips with the backend from [ai-services](https://github.com/ai-sound-design/ai-services); waiting times are sped up. Watch with sound.
+
+### 1. Spotting
+A vision-language model finds the scenes and sound events in the picture; each becomes a memory location with start and end.
+
+https://github.com/user-attachments/assets/1b022c5e-7b1d-4c9f-98c3-0eaf6f0797dd
+
+<details>
+<summary>Spotting in detail</summary>
+
+Sends the selected video range to a vision-language backend and places a memory location for every sound event it detects, with start and end timecode, plus one marker per clip boundary. *Spot Selection* works on the selection, *Spot Entire Track...* on the whole video track. *Detect scenes* first groups the clips into scenes (one place, one continuous stretch of time) and adds one memory location per scene, which the Hybrid mode uses; *Detect sound events* can be limited to kinds of sound (ambience, foley, SFX, music, dialogue), which the model is told and other events are dropped.
+
+</details>
 
 ### 2. Sound Recommendation
-https://github.com/user-attachments/assets/05d01e95-872f-4549-a6ed-f4d72c6ab3d3
+Searches a sound library by picture, by an existing sound or by a sketch; the hits can be previewed and imported cut to the selection.
 
-### 3. Spotting Support
-https://github.com/user-attachments/assets/4fcb9db9-5133-450c-b541-a01176fe2abb
+https://github.com/user-attachments/assets/3e4330c4-9918-4de3-83ac-7c54e1992e78
 
-## What This Project Does
+<details>
+<summary>Sound Recommendation in detail</summary>
 
-The project enables four AI support workflows inside Pro Tools. The user marks a time range on any track; the plugin finds the video clips beneath it and handles each clip on its own.
+Retrieves candidate sounds from a searchable library, with preview and import onto the plugin's track. *From video* searches with the video under the marked range (and the prompt, if any); *From sound* searches with the audio of the clips under the range on the track(s) it lies on (mixed when there are several), so an existing or generated sound can be swapped for archive recordings of the same kind. *From sketch* takes the clips under the range as a sketch of how the sound runs (a voice saying "tut tut tut", taps on a desk) and the prompt as what it is: the words find the recordings, the sketch's loudness shape chooses the stretch inside each one, nothing of the sketch's timbre is used. A search by sound or sketch names the stretch of each recording that matches, and preview and import take just that stretch, in the length of the selection. The import places a recording as Hybrid places its pieces: *Cut to the selection* trims the clip to the marked range and leaves the rest of the file as handles for the Trim tool (off: the whole recording goes in, a long one onto a new track); a recording wider than the plugin's track (stereo onto mono) keeps its width on a new track of its own; *Keep handles* fetches a matched stretch with the Hybrid profile's handle length before and after it; *Auto fade* gives the clip Pro Tools' own fades from the Hybrid profile's batch-fades preset, outside or inside the range as set there.
 
-1. **Spotting:** Sends the selected video range to a vision-language backend and places a memory location for every sound event it detects, with start and end timecode, plus one marker per clip boundary. *Spot Selection* works on the selection, *Spot Entire Track...* on the whole video track. *Detect scenes* first groups the clips into scenes (one place, one continuous stretch of time) and adds one memory location per scene, which the Hybrid mode uses; *Detect sound events* can be limited to kinds of sound (ambience, foley, SFX, music, dialogue), which the model is told and other events are dropped.
-2. **Sound Generation:** Generates sound for the selected range from the video and an optional text prompt (or from the prompt alone, T2A; the sound is as long as the marked range (*Auto* in the Duration list) unless a fixed length is picked) and places the result on the plugin's track at the clip's position. The seed field defaults to -1, a fresh random seed per run; the seed that was used is part of the file and clip name, so a result can be repeated.
-3. **Sound Recommendation:** Retrieves candidate sounds from a searchable library, with preview and import onto the plugin's track. *From video* searches with the video under the marked range (and the prompt, if any); *From sound* searches with the audio of the clips under the range on the track(s) it lies on (mixed when there are several), so an existing or generated sound can be swapped for archive recordings of the same kind. *From sketch* takes the clips under the range as a sketch of how the sound runs (a voice saying "tut tut tut", taps on a desk) and the prompt as what it is: the words find the recordings, the sketch's loudness shape chooses the stretch inside each one, nothing of the sketch's timbre is used. A search by sound or sketch names the stretch of each recording that matches, and preview and import take just that stretch, in the length of the selection. The import places a recording as Hybrid places its pieces: *Cut to the selection* trims the clip to the marked range and leaves the rest of the file as handles for the Trim tool (off: the whole recording goes in, a long one onto a new track); a recording wider than the plugin's track (stereo onto mono) keeps its width on a new track of its own; *Keep handles* fetches a matched stretch with the Hybrid profile's handle length before and after it; *Auto fade* gives the clip Pro Tools' own fades from the Hybrid profile's batch-fades preset, outside or inside the range as set there.
-4. **Hybrid:** Asks the backend for the individual sound events in the selected range and gets one generated sound per event back, placed at the event's position. The sounds of a scene share at most the *tracks per scene* set in Settings (default 8, the usual guideline): every sound gets a track of its own (pieces of the same sound share it) and only when the budget is used up do different sounds share a track where they do not overlap in time, the tracks are named after the scene (`Living room, day 1 (db)`, `… 2 (gen)`) and every clip after its event or recording. Further library layers are only placed where a track within the budget is free.
-   - *Events*: where the sound events come from. *Spot everything*: the backend finds the events and scenes of the range itself, kept to the kinds ticked below (Ambience, Foley, SFX, Music, Dialogue, as in Spotting). *Markers, spot the rest*: the memory locations inside the range are the events (a spotting run, or markers set by hand) and "Scene n: …" markers the scenes; a clip without events is spotted first (the events it finds are written into the session as memory locations), scenes without markers are detected. *Markers only*: a clip without memory locations is skipped.
-   - *Replace earlier hybrid clips in the range*: before the new sounds are placed, the range is cleared on every track of an earlier hybrid run (names ending in "(gen)" or "(db)"), so a repeated run replaces its clips instead of stacking new ones on the old.
-   - The negative prompt is empty by default: the backend builds each event's own negative from the other events that overlap it in time (the water does not get the birds, the birds not the water) and, for everything but dialogue and music, the list against voices and music; whatever is typed is added to every sound.
-   - *Use database sounds*: the backend also finds library recordings that sound like each generated sound, by audio embedding and located to the second inside long recordings, and places them instead of the generated sound, on the scene's `(db)` tracks (the generated one stays only where nothing matched). *Keep generated sounds* places it too, on the scene's `(gen)` tracks. A generated sound is searched whole first and only cut into pieces where a cut improves the match, up to the *pieces per 10 s* set in Settings; *max db tracks* allows further tracks with other recordings where they still fit, and *min similarity* leaves weak matches out.
-   - *Keep ambience handles*: an ambience piece keeps the seconds set in Settings (*Ambience handles*, default 10) of its recording before and after the event in its file, and the clip is trimmed to the event, so the handles can be pulled out with the Trim tool when a correction is needed; off cuts the piece to the event. A handle that would begin before the session start is cut there. *Auto fade* gives the clip Pro Tools' own fade-in and fade-out of *fade (s)* (Settings, default 1): with *Fade place* outside the event the clip keeps that much of the handle beyond the event on each side and the fade runs over it, so the sound is at full level at the event's edges; inside, the clip ends at the event and the fade runs within it, as an ambience starts at a cut; the fades come from a batch-fades preset (*Fade preset* in Settings, default "AI Sound Design"; create it once: select a range across a clip's edges, Edit > Fades > Create…, tick *Create new fade ins* and *Create new fade outs*, set their lengths to the same value, then *Save Settings As…* into the root settings folder) and are editable like any fade; off leaves the fades to you.
-   - Scenes: a hybrid run always works per scene, from the session's scene markers (a spotting run with *Detect scenes*, corrected by hand if needed) or, where there are none, detected by the backend (one place, one continuous stretch of time), named and written into the session as memory locations.
-   - *Run on entire track…*: the whole film. The plugin first counts the clips and shows a rough duration (hours for a feature), then runs scene by scene. The action button becomes *Stop*; what was placed stays, and a stopped or crashed run can be continued later, because the companion keeps a journal of every backend answer and every placed clip. There is no time limit: the companion writes a heartbeat into its progress file, and only when that stops for five minutes does the plugin ask whether to keep waiting. An ambience event longer than the generation model's maximum gets its library recording in the event's length.
+</details>
+
+### 3. Sound Generation
+Generates sound for the range from the video and an optional prompt and places it on the plugin's track, in sync with the picture.
+
+https://github.com/user-attachments/assets/3c08a27e-84db-42ea-bae5-5ca85c67e3d0
+
+<details>
+<summary>Sound Generation in detail</summary>
+
+Generates sound for the selected range from the video and an optional text prompt (or from the prompt alone, T2A; the sound is as long as the marked range (*Auto* in the Duration list) unless a fixed length is picked) and places the result on the plugin's track at the clip's position. A range shorter than the model's minimum (MMAudio: 4 s) is made from that much video around it and cut back to the range, the rest kept as handles. The seed field defaults to -1, a fresh random seed per run; the seed that was used is part of the file and clip name, so a result can be repeated.
+
+</details>
+
+### 4. Hybrid
+Spots the events of a whole range, generates a sound for each and uses it to find library recordings, placed per scene on one track per sound.
+
+https://github.com/user-attachments/assets/0d8f86b1-ce94-4fe8-9c39-b86115dfc923
+
+<details>
+<summary>Hybrid in detail</summary>
+
+Asks the backend for the individual sound events in the selected range and gets one generated sound per event back, placed at the event's position. The sounds of a scene share at most the *tracks per scene* set in Settings (default 8, the usual guideline): every sound gets a track of its own (pieces of the same sound share it) and only when the budget is used up do different sounds share a track where they do not overlap in time, the tracks are named after the scene (`Living room, day 1 (db)`, `… 2 (gen)`) and every clip after its event or recording. Further library layers are only placed where a track within the budget is free.
+
+- *Events*: where the sound events come from. *Spot everything*: the backend finds the events and scenes of the range itself, kept to the kinds ticked below (Ambience, Foley, SFX, Music, Dialogue, as in Spotting). *Markers, spot the rest*: the memory locations inside the range are the events (a spotting run, or markers set by hand) and "Scene n: …" markers the scenes; a clip without events is spotted first (the events it finds are written into the session as memory locations), scenes without markers are detected. *Markers only*: a clip without memory locations is skipped.
+- *Replace earlier hybrid clips in the range*: before the new sounds are placed, the range is cleared on every track of an earlier hybrid run (names ending in "(gen)" or "(db)"), so a repeated run replaces its clips instead of stacking new ones on the old.
+- The negative prompt is empty by default: the backend builds each event's own negative from the other events that overlap it in time (the water does not get the birds, the birds not the water) and, for everything but dialogue and music, the list against voices and music; whatever is typed is added to every sound.
+- *Use database sounds*: the backend also finds library recordings for each event: the event's description proposes candidates from the library, and among those the ones that sound most like the generated sound are chosen, by audio embedding and located to the second inside long recordings. They are placed instead of the generated sound, on the scene's `(db)` tracks (the generated one stays only where nothing matched). *Keep generated sounds* places it too, on the scene's `(gen)` tracks. A generated sound is searched whole first and only cut into pieces where a cut improves the match, up to the *pieces per 10 s* set in Settings; *max db tracks* allows further tracks with other recordings where they still fit, and *min similarity* leaves weak matches out.
+- *Keep ambience handles*: an ambience piece keeps the seconds set in Settings (*Ambience handles*, default 10) of its recording before and after the event in its file, and the clip is trimmed to the event, so the handles can be pulled out with the Trim tool when a correction is needed; off cuts the piece to the event. A handle that would begin before the session start is cut there. *Auto fade* gives the clip Pro Tools' own fade-in and fade-out of *fade (s)* (Settings, default 1): with *Fade place* outside the event the clip keeps that much of the handle beyond the event on each side and the fade runs over it, so the sound is at full level at the event's edges; inside, the clip ends at the event and the fade runs within it, as an ambience starts at a cut; the fades come from a batch-fades preset (*Fade preset* in Settings, default "AI Sound Design"; create it once: select a range across a clip's edges, Edit > Fades > Create…, tick *Create new fade ins* and *Create new fade outs*, set their lengths to the same value, then *Save Settings As…* into the root settings folder) and are editable like any fade; off leaves the fades to you.
+- Scenes: a hybrid run always works per scene, from the session's scene markers (a spotting run with *Detect scenes*, corrected by hand if needed) or, where there are none, detected by the backend (one place, one continuous stretch of time), named and written into the session as memory locations.
+- *Run on entire track…*: the whole film. The plugin first counts the clips and shows a rough duration (hours for a feature), then runs scene by scene. The action button becomes *Stop*; what was placed stays, and a stopped or crashed run can be continued later, because the companion keeps a journal of every backend answer and every placed clip. There is no time limit: the companion writes a heartbeat into its progress file, and only when that stops for five minutes does the plugin ask whether to keep waiting. An ambience event longer than the generation model's maximum gets its library recording in the event's length.
+
+</details>
+
+<details>
+<summary>Mode switch, video track and progress in detail</summary>
 
 The modes sit in one switch: Spotting, Sound Recommendation and Sound Generation in a column, and Hybrid, which combines the three, beside them; hovering a mode explains it. *Video track* says which video track a selection or a whole-track run is mapped onto when the session has several (each dropped file makes one): *Topmost* takes the first, or, for a selection lying on a video track, that one, or, for a selection on an audio track, the first video track with video under it; the list offers the session's video tracks by name. A run's status line names the track used when there was a choice. A mode is greyed out, with the reason in its tooltip, when its kind of backend has no adapter profile or does not answer, and the database switch when the hybrid backend reports no audio index. Long runs show a progress bar with the clip count and, where the backend reports it, the progress inside the clip ("step 2 of 3: frames 9-16 of 18", "sound 3 of 6: cat footsteps").
+
+</details>
 
 ## Repository Structure
 
@@ -77,7 +115,7 @@ The system is a plugin and a backend of HTTP services (generation, search, spott
 
 - Backend services (separate repository)
   - Generation: video-conditioned audio generation (MMAudio as the reference)
-  - Search: retrieval over indexed sound libraries by video or text (X-CLIP + pgvector) and by sound (CLAP audio embeddings of 10 s windows, located to the second)
+  - Search: retrieval over indexed sound libraries by video or text (X-CLIP + pgvector) and by sound (CLAP audio embeddings of 2 s windows merged into segments where they sound alike, located to the second)
   - Spotting: sound events with timecodes from a vision-language model
   - Hybrid: one generated sound per event, optionally matched with library recordings
 
