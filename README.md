@@ -1,17 +1,7 @@
 # ai-protools-aax
 
-Research prototype for AI-assisted sound design in film post-production (anonymized for peer review).
+Research prototype for AI-assisted sound design in film post-production.
 The system combines AI-based audio generation, semantic sound recommendation, and spotting assistance in a Pro Tools-native AAX plugin workflow.
-
-## Paper Version
-
-The exact state of this repository at the time of paper submission is preserved and will not change:
-
-- Branch: [`paper-submission`](https://github.com/ai-sound-design/ai-protools-aax/tree/paper-submission)
-- Tag: [`v1-paper-submission`](https://github.com/ai-sound-design/ai-protools-aax/releases/tag/v1-paper-submission)
-
-The `main` branch continues to be developed. In particular, the design implications derived from the paper will be implemented here, so `main` may differ from the version described in the paper.
-GitHub's auto-generated source archives do not include the Git submodules in `external/`; use `git clone --recurse-submodules` instead.
 
 ## Modes
 
@@ -123,6 +113,7 @@ The system is a plugin and a backend of HTTP services (generation, search, spott
 
 1. **Backend.** The plugin needs its backend services (generation, search, spotting, and hybrid for one sound per event). A complete, ready-to-run example is the [ai-services repository](https://github.com/ai-sound-design/ai-services): one `docker compose up` on a machine with an NVIDIA GPU, plus the contract each service must fulfil if you want to write your own.
 2. **Plugin.** Build it and set up its embedded Python runtime:
+   - Source: `git clone --recurse-submodules`; GitHub's auto-generated source archives do not include the Git submodules in `external/`.
    - [`aax-plugin/README.md`](aax-plugin/README.md): embedded Python runtime for the plugin; see also [`aax-plugin/EMBEDDED_PYTHON_SETUP.md`](aax-plugin/EMBEDDED_PYTHON_SETUP.md) and [`aax-plugin/MAC_BUILD_GUIDE.md`](aax-plugin/MAC_BUILD_GUIDE.md)
    - Signing: the Pro Tools Developer Build loads the unsigned plugin; the regular Pro Tools only loads plugins signed with PACE's `wraptool`. [`aax-plugin/sign_aax_windows.ps1`](aax-plugin/sign_aax_windows.ps1) and [`aax-plugin/sign_aax_mac.sh`](aax-plugin/sign_aax_mac.sh) do that after each build; they need the PACE Code Signing For AAX SDK, the "PACE Tools" licence on a plugged-in iLok and your iLok account and wrap-configuration GUID in `ILOK_ACCOUNT` and `PACE_WCGUID` (details in the Mac build guide, [Step 3](aax-plugin/MAC_BUILD_GUIDE.md#step-3-sign-plugin-with-pace)).
    - Installer (Windows): [`aax-plugin/build_installer_windows.ps1`](aax-plugin/build_installer_windows.ps1) packs the signed bundle into one setup `.exe` (Inno Setup 6, `winget install JRSoftware.InnoSetup`) that installs the plugin into Pro Tools' plug-in folder on any machine, replacing an older version; the Mac counterpart is [`aax-plugin/create_installer_mac.sh`](aax-plugin/create_installer_mac.sh). Without an installer, copy the bundle into `C:\Program Files\Common Files\Avid\Audio\Plug-Ins` (Windows) or `/Library/Application Support/Avid/Audio/Plug-Ins` (macOS) with Pro Tools closed.
@@ -223,6 +214,7 @@ This project integrates with the **BBC Sound Effects Archive** for research-only
 - Archive: https://sound-effects.bbcrewind.co.uk/
 - License: https://sound-effects.bbcrewind.co.uk/licensing
 
-## Author
+## Authors
 
-Anonymized for peer review.
+- [Ludwig Degenhardt](https://github.com/uzerterter): the original plugin with audio generation, sound recommendation and the spotting support for the user study
+- [Christoph J. Weber](https://github.com/chris-j-weber): automatic spotting, the hybrid mode and the development since

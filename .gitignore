@@ -172,7 +172,7 @@ db-dump/*.sql
 # Local environment configuration (contains secrets)
 .env
 
-# BBC metadata database backups (not part of the anonymized repository)
+# BBC metadata database backups (not part of the repository)
 companion/database/*.sql
 
 # Windows installer build output (build_installer_windows.ps1)
